@@ -6,7 +6,7 @@ persisted catalogue at data/library.json, so normal browsing hits the Drive API
 zero times — tiles, seasons, episodes and pre-cached posters all come off disk.
 
 Design split:
-  * Pure functions (classify_title, classify_loose, diff_library, ...) operate on
+  * Pure functions (classify_node, classify_loose, diff_library, ...) operate on
     plain dicts and are exhaustively unit-tested on synthetic data — no network.
   * The Scanner does the I/O: it walks drives via DriveAPI (which handles
     rate-limit backoff), resolves posters via TMDB, diffs against the existing
@@ -130,28 +130,39 @@ def _group_episodes(videos, show_title):
     return seasons
 
 
-def classify_title(node):
-    """Classify one top-level title folder into a movie or show record, or None.
+def _all_videos(node):
+    """Flatten every descendant video under a node (recursively)."""
+    out = list(node["videos"])
+    for sf in node["subfolders"]:
+        out.extend(_all_videos(sf))
+    return out
 
-    node = {
-      "id", "name", "drive_id",
-      "videos":     [ _video_dict(...) ],      # all descendant videos
-      "subfolders": [folder name, ...],        # all descendant folder names
-    }
 
-    TV SHOW if it has a season-named subfolder OR >=2 episode-named videos.
-    Otherwise MOVIE (main video = largest non-sample file). Sample/trailer/
-    featurette/extra files are ignored.
+def _is_show(node):
+    """True if a folder node is a TV show.
+
+    A show has a DIRECT season-named subfolder, OR >=2 of its videos (direct, or
+    in its immediate season subfolders) carry episode markers. Detection looks at
+    immediate children only — deeper folders are recursed into as their own tiles.
     """
-    videos = [v for v in node["videos"] if not naming.is_sample(v["name"])]
+    if any(naming.season_from_folder(sf["name"]) is not None for sf in node["subfolders"]):
+        return True
+    count = sum(1 for v in node["videos"] if naming.episode_number(v["name"]) is not None)
+    for sf in node["subfolders"]:
+        if naming.season_from_folder(sf["name"]) is not None:
+            count += sum(1 for v in sf["videos"] if naming.episode_number(v["name"]) is not None)
+    return count >= 2
+
+
+def _show_record(node):
+    """Build one show record from a node's descendant videos, or None if empty."""
+    videos = [v for v in _all_videos(node) if not naming.is_sample(v["name"])]
     if not videos:
         return None
     title, year = naming.clean_title(node["name"])
-    has_season_folder = any(naming.season_from_folder(s) is not None for s in node["subfolders"])
-    episode_videos = sum(1 for v in videos if naming.episode_number(v["name"]) is not None)
-
-    base = {
+    return {
         "id": node["id"],
+        "type": "show",
         "title": title,
         "year": year,
         "drive_id": node["drive_id"],
@@ -162,20 +173,75 @@ def classify_title(node):
         # Raw folder name kept transiently so the season-grouping pass can detect
         # "<Show> Season N" / bare "Season N" siblings. Stripped before persisting.
         "_folder_name": node["name"],
+        "seasons": _group_episodes(videos, title),
     }
 
-    if has_season_folder or episode_videos >= 2:
-        base["type"] = "show"
-        base["seasons"] = _group_episodes(videos, title)
-        return base
 
-    main = max(videos, key=lambda v: v["size"])
-    base["type"] = "movie"
-    base["file_id"] = main["id"]
-    base["size"] = main["size"]
-    base["duration_ms"] = main["duration_ms"]
-    base["_video_name"] = main["name"]
-    return base
+def _movie_record(node, video, from_folder):
+    """One movie record for a single video; title from the folder or the file."""
+    title, year = naming.clean_title(node["name"] if from_folder else video["name"])
+    return {
+        "id": video["id"],
+        "type": "movie",
+        "title": title,
+        "year": year,
+        "drive_id": node["drive_id"],
+        "folder_id": node["id"],
+        "poster": None,
+        "tmdb_id": None,
+        "overview": None,
+        "file_id": video["id"],
+        "size": video["size"],
+        "duration_ms": video["duration_ms"],
+        # Transient keys kept so group_seasons can still merge a stray movie folder
+        # that turns out to be a bare/prefixed season; stripped before persisting.
+        "_folder_name": node["name"],
+        "_video_name": video["name"],
+    }
+
+
+def _expand_movies(node):
+    """Expand a non-show node into movie records, recursing into subfolders.
+
+    * leaf movie folder (videos, no non-extras subfolders): 1 video -> one movie
+      named from the FOLDER; multiple videos -> one movie per video (file-named).
+    * container (has non-extras subfolders): each stray direct video becomes a
+      file-named movie, plus the recursion into each non-extras subfolder.
+    Extras subfolders (Featurettes/Extras/...) are ignored entirely.
+    """
+    direct = [v for v in node["videos"] if not naming.is_sample(v["name"])]
+    subs = [sf for sf in node["subfolders"] if not naming.is_extras_folder(sf["name"])]
+
+    if not subs:
+        if not direct:
+            return []
+        if len(direct) == 1:
+            return [_movie_record(node, direct[0], from_folder=True)]
+        return [_movie_record(node, v, from_folder=False) for v in direct]
+
+    records = [_movie_record(node, v, from_folder=False) for v in direct]
+    for sf in subs:
+        records.extend(classify_node(sf))
+    return records
+
+
+def classify_node(node):
+    """Classify one folder node into a list of movie/show records (recursive).
+
+    node = {
+      "id", "name", "drive_id",
+      "videos":     [ _video_dict(...) ],  # videos DIRECTLY in this folder
+      "subfolders": [ child node, ... ],   # nested child nodes (same shape)
+    }
+
+    A show yields a single show record; anything else expands into one or more
+    movie tiles, recursing through collection/container folders so each film is
+    its own tile.
+    """
+    if _is_show(node):
+        rec = _show_record(node)
+        return [rec] if rec else []
+    return _expand_movies(node)
 
 
 def classify_loose(drive_id, loose_files):
@@ -549,25 +615,28 @@ class Scanner:
                 break
         return out
 
-    async def _walk_title(self, drive_id, folder):
-        """Gather every descendant video + subfolder name under a title folder."""
+    async def _walk_title(self, drive_id, folder, ancestors=()):
+        """Recursively build a nested tree node preserving folder hierarchy.
+
+        node = {id, name, drive_id, videos:[direct videos], subfolders:[child nodes]}
+        Each video carries its ancestor folder-name chain so season detection and
+        episode grouping still work when a show is nested inside a container.
+        """
+        name = folder.get("name") or ""
         node = {
             "id": folder.get("id"),
-            "name": folder.get("name") or "",
+            "name": name,
             "drive_id": drive_id,
             "videos": [],
             "subfolders": [],
         }
-        stack = [(folder.get("id"), [])]  # (folder_id, ancestor folder names)
-        while stack:
-            fid, ancestors = stack.pop()
-            children = await self._list_folder(drive_id, fid)
-            for c in children:
-                if _is_folder(c):
-                    node["subfolders"].append(c.get("name") or "")
-                    stack.append((c.get("id"), ancestors + [c.get("name") or ""]))
-                elif _is_video(c):
-                    node["videos"].append(_video_dict(c, fid, ancestors))
+        child_anc = tuple(ancestors) + (name,)
+        children = await self._list_folder(drive_id, node["id"])
+        for c in children:
+            if _is_folder(c):
+                node["subfolders"].append(await self._walk_title(drive_id, c, child_anc))
+            elif _is_video(c):
+                node["videos"].append(_video_dict(c, node["id"], child_anc))
         return node
 
     async def _scan_drive(self, drive_id):
@@ -589,9 +658,7 @@ class Scanner:
                     log.warning("Skipping folder %r: %s", entry.get("name"), e.message)
                     self.status["error"] = "Folder %s: %s" % (entry.get("name"), e.message)
                     continue
-                rec = classify_title(node)
-                if rec:
-                    records.append(rec)
+                records.extend(classify_node(node))
             elif _is_video(entry):
                 loose.append(entry)
         records.extend(classify_loose(drive_id, loose))
@@ -639,9 +706,15 @@ class Scanner:
             added, removed = diff_library(old_titles, new_titles)
             merge_existing_metadata(old_titles, new_titles)
 
-            for tid in added:
-                await self._resolve_poster(new_titles[tid])
-                self.status["added"] += 1
+            self.status["added"] = len(added)
+
+            # Resolve posters for EVERY title still missing one when TMDB is
+            # enabled. This backfills existing titles the first time a key is
+            # configured; titles that already have a poster are skipped.
+            if self.tmdb.enabled:
+                for rec in new_titles.values():
+                    if not rec.get("poster"):
+                        await self._resolve_poster(rec)
 
             prune_removed_posters(old_titles, new_titles, removed)
             self.status["removed"] = len(removed)

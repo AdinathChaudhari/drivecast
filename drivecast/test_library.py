@@ -19,6 +19,7 @@ def vid(fid, name, size=1000, dur=None, parent="p", ancestors=()):
 
 
 def node(name, videos, subfolders=(), fid="folder1", drive="drv1"):
+    """Build a tree node. `subfolders` is a list of child NODES (nested)."""
     return {"id": fid, "name": name, "drive_id": drive,
             "videos": list(videos), "subfolders": list(subfolders)}
 
@@ -36,45 +37,113 @@ def rawfolder(fid, name):
 
 # ------------------------------------------------------- classify: movie ------
 
-def test_classify_movie_folder():
+def only(recs):
+    """Assert a single record was produced and return it."""
+    assert len(recs) == 1, recs
+    return recs[0]
+
+
+def test_classify_single_movie_folder_titled_from_folder():
     n = node("Your Name (2016) [BluRay] [1080p]",
              [vid("v1", "Your.Name.2016.1080p.BluRay.mkv", size=5000, dur=360000)])
-    rec = library.classify_title(n)
+    rec = only(library.classify_node(n))
     assert rec["type"] == "movie"
-    assert rec["title"] == "Your Name"
+    assert rec["title"] == "Your Name"   # from the FOLDER name
     assert rec["year"] == 2016
+    assert rec["id"] == "v1"             # id == the video's file_id
     assert rec["file_id"] == "v1"
+    assert rec["folder_id"] == "folder1"
     assert rec["duration_ms"] == 360000
     assert rec["size"] == 5000
 
 
-def test_movie_picks_largest_and_ignores_samples():
-    n = node("Inception (2010)", [
-        vid("s", "Inception-sample.mkv", size=9999),        # sample: excluded
-        vid("t", "Inception-trailer.mp4", size=8888),       # trailer: excluded
-        vid("main", "Inception.2010.1080p.mkv", size=5000),
-        vid("small", "Inception.2010.480p.mkv", size=1000),
+def test_leaf_folder_multiple_videos_expands_per_file():
+    # A leaf folder with >1 main video -> one movie per file (file-named),
+    # and sample/trailer files are ignored.
+    n = node("Double Feature", [
+        vid("s", "Movie-sample.mkv", size=9999),        # sample: excluded
+        vid("t", "Movie-trailer.mp4", size=8888),       # trailer: excluded
+        vid("a", "Mad Max Fury Road 2015 1080p.mkv", size=5000),
+        vid("b", "Sicario 2015 1080p.mkv", size=1000),
     ])
-    rec = library.classify_title(n)
-    assert rec["type"] == "movie"
-    assert rec["file_id"] == "main"  # largest non-sample
+    recs = library.classify_node(n)
+    by_id = {r["file_id"]: r for r in recs}
+    assert set(by_id) == {"a", "b"}          # only the two real videos
+    assert all(r["type"] == "movie" for r in recs)
+    assert by_id["a"]["title"] == "Mad Max Fury Road"   # from the FILE name
+    assert by_id["b"]["title"] == "Sicario"
 
 
-def test_empty_folder_returns_none():
-    assert library.classify_title(node("Empty", [])) is None
+def test_empty_folder_returns_no_records():
+    assert library.classify_node(node("Empty", [])) == []
     # Folder with only a sample is effectively empty.
-    assert library.classify_title(node("OnlySample", [vid("s", "movie-sample.mkv")])) is None
+    assert library.classify_node(node("OnlySample", [vid("s", "movie-sample.mkv")])) == []
+
+
+# ------------------------------------------------ classify: recursion ---------
+
+def test_container_of_movie_folders_expands_to_one_tile_each():
+    # A collection folder ("Phase 1") of enumerated single-movie subfolders must
+    # become one tile per movie, NOT a single "Phase 1" tile.
+    iron = node("01) Iron Man (2008) [1080p]",
+                [vid("f1", "01.Iron Man (2008) 1080p.mkv")], fid="ironF")
+    hulk = node("02) The Incredible Hulk (2008) [1080p]",
+                [vid("f2", "02.The Incredible Hulk (2008) 1080p.mkv")], fid="hulkF")
+    phase = node("Phase 1", [], subfolders=[iron, hulk], fid="phaseF")
+    recs = library.classify_node(phase)
+    titles = {r["title"] for r in recs}
+    assert titles == {"Iron Man", "The Incredible Hulk"}
+    assert "Phase 1" not in titles
+    assert {r["file_id"] for r in recs} == {"f1", "f2"}
+
+
+def test_extras_subfolder_is_ignored():
+    # A movie folder with a Featurettes extras subfolder is still one movie.
+    extras = node("Featurettes", [vid("x", "Behind the scenes.mkv")], fid="exF")
+    movie = node("Blade - Trinity (2004) [1080p]",
+                 [vid("m", "Blade.Trinity.2004.1080p.mkv")],
+                 subfolders=[extras], fid="bladeF")
+    rec = only(library.classify_node(movie))
+    assert rec["type"] == "movie"
+    assert rec["title"] == "Blade - Trinity"
+    assert rec["file_id"] == "m"
+
+
+def test_container_with_stray_videos_and_subfolders():
+    # "Hollywood": loose movie files alongside a movie subfolder -> each is a tile.
+    sub = node("The Godfather (1972)",
+               [vid("g", "The.Godfather.1972.1080p.mkv")], fid="gfF")
+    hollywood = node("Hollywood", [
+        vid("h1", "Whiplash 2014 1080p.mkv"),
+        vid("h2", "Sicario 2015 1080p.mkv"),
+    ], subfolders=[sub], fid="hwF")
+    recs = library.classify_node(hollywood)
+    titles = {r["title"] for r in recs}
+    assert titles == {"Whiplash", "Sicario", "The Godfather"}
+
+
+def test_nested_containers_recurse_to_movies():
+    # Container of a container of movie-folders.
+    inner_movie = node("Blade (1998) [1080p]",
+                       [vid("bl", "Blade.1998.1080p.mkv")], fid="blF")
+    blade_series = node("Blade Series", [], subfolders=[inner_movie], fid="bsF")
+    top = node("Hollywood", [], subfolders=[blade_series], fid="topF")
+    rec = only(library.classify_node(top))
+    assert rec["title"] == "Blade"
+    assert rec["file_id"] == "bl"
 
 
 # ------------------------------------------------------- classify: show -------
 
 def test_show_by_season_subfolders():
-    videos = [
-        vid("e1", "Ep 01.mkv", parent="s1", ancestors=["Season 1"]),
-        vid("e2", "Ep 02.mkv", parent="s1", ancestors=["Season 1"]),
-        vid("e3", "Ep 01.mkv", parent="s2", ancestors=["Season 2"]),
-    ]
-    rec = library.classify_title(node("The Bear", videos, subfolders=["Season 1", "Season 2"]))
+    s1 = node("Season 1", [
+        vid("e1", "Ep 01.mkv", parent="s1", ancestors=["The Bear", "Season 1"]),
+        vid("e2", "Ep 02.mkv", parent="s1", ancestors=["The Bear", "Season 1"]),
+    ], fid="s1")
+    s2 = node("Season 2", [
+        vid("e3", "Ep 01.mkv", parent="s2", ancestors=["The Bear", "Season 2"]),
+    ], fid="s2")
+    rec = only(library.classify_node(node("The Bear", [], subfolders=[s1, s2])))
     assert rec["type"] == "show"
     seasons = {s["season"]: s for s in rec["seasons"]}
     assert set(seasons) == {1, 2}
@@ -88,7 +157,7 @@ def test_show_by_flat_sxxexx_episodes():
         vid("e1", "Breaking.Bad.S05E01.mkv"),
         vid("e3", "Breaking.Bad.S05E10.mkv"),
     ]
-    rec = library.classify_title(node("Breaking Bad", videos))
+    rec = only(library.classify_node(node("Breaking Bad", videos)))
     assert rec["type"] == "show"
     eps = rec["seasons"][0]["episodes"]
     assert [e["episode"] for e in eps] == [1, 2, 10]  # sorted by episode number
@@ -97,7 +166,7 @@ def test_show_by_flat_sxxexx_episodes():
 
 def test_single_episode_is_still_a_movie_heuristic():
     # One episode-named file and no season folder -> falls through to movie.
-    rec = library.classify_title(node("Random", [vid("v", "Random.S01E01.mkv")]))
+    rec = only(library.classify_node(node("Random", [vid("v", "Random.S01E01.mkv")])))
     assert rec["type"] == "movie"
 
 
@@ -106,7 +175,7 @@ def test_episode_title_extracted():
         vid("a", "Frasier (1993) - S05E10 - Where Every Bloke.mkv"),
         vid("b", "Frasier (1993) - S05E11 - Perspectives.mkv"),
     ]
-    rec = library.classify_title(node("Frasier", videos))
+    rec = only(library.classify_node(node("Frasier", videos)))
     eps = rec["seasons"][0]["episodes"]
     assert eps[0]["title"] == "Where Every Bloke"
 

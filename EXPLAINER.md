@@ -302,10 +302,36 @@ resume shelf, because VLC won't tell drivecast where you stopped. That single
 limitation is the only reason the app suggests `brew install mpv`.
 
 **Posters.** Out of the box you'll see tidy placeholder cards (title + year on a
-gradient). If you drop a free **TMDB API key** into `config.json` (see the
-README), the cards turn into real movie and show posters — fetched once and
+gradient). If you drop a free **TMDB API key** into `secrets/secrets.json` (see
+the README), the cards turn into real movie and show posters — fetched once and
 cached, so it's fast forever after. This is purely cosmetic; the app works
 identically without it.
 
 That's it. There's no library to import, no scan to wait for, nothing syncs. You
 run one command and your entire cloud collection is right there to play.
+
+---
+
+## 10. Keeping your data private (why this repo is safe to open-source)
+
+drivecast is deliberately built so the *code* is shareable but *your stuff* never
+is. The split is clean:
+
+- **Secrets** (your TMDB key, any OAuth client JSON) live in `secrets/`, which is
+  gitignored. The code loads the key from `secrets/secrets.json` or the
+  `DRIVECAST_TMDB_API_KEY` environment variable and — importantly — **never
+  writes it back into `config.json`**, so it can't accidentally end up in a file
+  that gets committed.
+- **Your Google login** isn't in drivecast at all. It lives in rclone's own
+  config; drivecast only ever borrows a short-lived token at runtime.
+- **Your library** — the drive and file names, watch history, posters — all sit
+  in `data/`, also gitignored. None of it is in the repo.
+- The server only ever listens on `127.0.0.1`, so it's not reachable from the
+  network even while running.
+- As a backstop, a **pre-commit hook** scans staged changes and refuses to commit
+  anything that looks like a key, token, or credential file — so even a slip of
+  `git add` can't leak a secret.
+
+The result: the repository contains only the program. Clone it, add your own
+rclone remote and (optionally) your own TMDB key, and it's yours — with none of
+the original author's data anywhere in it.

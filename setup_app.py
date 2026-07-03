@@ -33,7 +33,7 @@ OPTIONS = {
     'plist': {
         'CFBundleName': 'drivecast',
         'CFBundleDisplayName': 'drivecast',
-        'CFBundleIdentifier': 'com.adinath.drivecast',
+        'CFBundleIdentifier': 'com.drivecast.app',
         'CFBundleVersion': '1.0.0',
         'CFBundleShortVersionString': '1.0.0',
         # Menu-bar agent: no Dock icon / app-switcher clutter. Still launchable

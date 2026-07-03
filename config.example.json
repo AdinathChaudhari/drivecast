@@ -1,6 +1,5 @@
 {
   "remote": "gdrive1",
-  "tmdb_api_key": "",
   "player": "auto",
   "port": 8737,
   "page_size": 200,

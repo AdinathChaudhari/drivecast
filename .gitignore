@@ -13,8 +13,10 @@ dist/
 assets/*.iconset/
 assets/icon_1024.png
 
-# Google OAuth credentials — SECRET, never commit
-secrets/
+# Secrets — API keys & OAuth credentials. Ignore everything under secrets/
+# EXCEPT the checked-in example that documents the format.
+secrets/*
+!secrets/secrets.example.json
 client_secret*.json
 *oauth*.json
 *credentials*.json

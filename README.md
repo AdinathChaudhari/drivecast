@@ -75,8 +75,10 @@ VLC works too but has no resume tracking — you'll see a banner suggesting mpv.
 ### 4. (Optional) TMDB posters
 
 Get a free API key from https://www.themoviedb.org/settings/api and put it in
-`config.json` as `tmdb_api_key`. Without a key, drivecast shows clean gradient
-placeholder cards (parsed title + year) instead of posters.
+**`secrets/secrets.json`** (see [Secrets & security](#secrets--security)) — copy
+`secrets/secrets.example.json` and fill in `tmdb_api_key`. Without a key,
+drivecast shows clean gradient placeholder cards (parsed title + year) instead of
+posters.
 
 ## Run
 
@@ -201,17 +203,46 @@ To enable posters:
 1. Get a free API key: https://www.themoviedb.org/settings/api (Developer plan,
    no fee). For the sign-up form, "Application URL" can be
    `http://localhost:8737` and "Type of Use" is **Desktop Application**.
-2. Open `config.json` and set `"tmdb_api_key": "your-key-here"`.
+2. Put the key in `secrets/secrets.json` (see [Secrets & security](#secrets--security)).
 3. Restart `app.py` and **Refresh** the library so new titles get posters.
+
+## Secrets & security
+
+drivecast is designed so **nothing personal ever reaches the repo**. All private
+material lives in gitignored locations and is loaded at runtime:
+
+- **API keys** → `secrets/secrets.json` (copy `secrets/secrets.example.json`):
+
+  ```json
+  { "tmdb_api_key": "your-tmdb-key" }
+  ```
+
+  You can also pass it via the `DRIVECAST_TMDB_API_KEY` environment variable.
+  Keys are **never** written back into `config.json`, so they can't leak there.
+- **Google Drive credentials** never touch drivecast — they live only in your
+  rclone config. Drop your own OAuth client JSON in `secrets/` if you keep one.
+- **`config.json`, `data/`, `secrets/`** are all gitignored. `data/` holds your
+  library catalogue, watch history and posters (your drive/file names) and stays
+  entirely local.
+- The web server binds to **`127.0.0.1` only** — never exposed on your network.
+- A **pre-commit hook** (`scripts/install-hooks.sh`) refuses to commit secret
+  files or key-shaped strings as a backstop. Install it after cloning:
+
+  ```sh
+  scripts/install-hooks.sh
+  ```
+
+The only thing you must supply is the rclone remote and (optionally) a TMDB key;
+neither is stored anywhere git can see.
 
 ## Configuration (`config.json`)
 
-Auto-created from `config.example.json` on first run.
+Auto-created from `config.example.json` on first run. Holds **non-secret**
+settings only — secrets go in `secrets/` (above).
 
 | key            | default   | meaning                                             |
 |----------------|-----------|-----------------------------------------------------|
 | `remote`       | `gdrive1` | rclone remote name (no trailing colon)              |
-| `tmdb_api_key` | `""`      | optional TMDB v3 API key for posters                |
 | `player`       | `auto`    | `auto` \| `mpv` \| `iina` \| `vlc`                  |
 | `port`         | `8737`    | local port (bound to 127.0.0.1 only)                |
 | `page_size`    | `200`     | Drive files.list page size                          |
@@ -220,7 +251,8 @@ Auto-created from `config.example.json` on first run.
 | `scan_throttle` | `0.15`   | seconds to pause between scan API calls (quota)     |
 
 `selected_drives` and `auto_refresh_on_startup` are normally set from the
-**Settings** view or the menu-bar app rather than by hand.
+**Settings** view or the menu-bar app rather than by hand. (`tmdb_api_key` is a
+secret — set it in `secrets/secrets.json`, not here.)
 
 ## Data (runtime, gitignored)
 

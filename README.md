@@ -84,13 +84,19 @@ mpv (and IINA) expose a JSON IPC socket that drivecast polls to save your
 playback position, powering the **Continue Watching** shelf and resume prompts.
 VLC works too but has no resume tracking — you'll see a banner suggesting mpv.
 
+**Choosing a player.** By default drivecast auto-picks mpv → IINA → VLC. To force
+one, use **Settings → Video player** in the app (it shows which players are
+installed), or set `"player"` in `config.json` to `auto` / `mpv` / `iina` / `vlc`.
+Playback works the same in any of them (VLC streams the local URL by requesting
+byte-ranges, just like mpv); only mpv/IINA report your position back for resume.
+
 ### 4. (Optional) TMDB posters
 
 Get a free API key from https://www.themoviedb.org/settings/api and put it in
-**`secrets/secrets.json`** (see [Secrets & security](#secrets--security)) — copy
-`secrets/secrets.example.json` and fill in `tmdb_api_key`. Without a key,
-drivecast shows clean gradient placeholder cards (parsed title + year) instead of
-posters.
+**`~/Library/Application Support/drivecast/secrets/secrets.json`** (see
+[Secrets & security](#secrets--security)) as `{"tmdb_api_key": "…"}`. Without a
+key, drivecast shows clean gradient placeholder cards (parsed title + year)
+instead of posters.
 
 ## Run
 
@@ -151,9 +157,11 @@ The bundle is written to **`dist/drivecast.app`**.
   menu bar rather than a Dock icon.
 - **Quit** from the menu-bar dropdown → **Quit**.
 
-> The bundled app uses drivecast's built-in defaults (remote `gdrive1`, port
-> `8737`). To customise those for the bundled app, edit `config.json` and run
-> from source, or rebuild after changing the defaults.
+> The bundled app and the source app share the same settings, secrets and
+> library in `~/Library/Application Support/drivecast/`, so your drive selection,
+> TMDB key, watch history and posters **persist across rebuilds**. Change most
+> settings in-app (**Settings** / the menu-bar submenus); edit
+> `~/Library/Application Support/drivecast/config.json` directly for the rest.
 
 ### Run without building (quick test)
 
@@ -217,7 +225,8 @@ To enable posters:
 1. Get a free API key: https://www.themoviedb.org/settings/api (Developer plan,
    no fee). For the sign-up form, "Application URL" can be
    `http://localhost:8737` and "Type of Use" is **Desktop Application**.
-2. Put the key in `secrets/secrets.json` (see [Secrets & security](#secrets--security)).
+2. Put the key in `~/Library/Application Support/drivecast/secrets/secrets.json`
+   (see [Secrets & security](#secrets--security)).
 3. Restart `app.py` and **Refresh** the library. The scan backfills posters for
    **every** title still missing one, so a first Refresh after adding the key
    fills in your whole existing library, not just newly-added titles.
@@ -225,13 +234,15 @@ To enable posters:
 ## Secrets & security
 
 drivecast is designed so **nothing personal ever reaches the repo**. All private
-material lives in gitignored locations and is loaded at runtime:
+material lives outside the repo (in `~/Library/Application Support/drivecast/`)
+and is loaded at runtime:
 
-- **API keys** → `secrets/secrets.json`:
+- **API keys** → `~/Library/Application Support/drivecast/secrets/secrets.json`:
 
   ```json
   { "tmdb_api_key": "your-tmdb-key" }
   ```
+  (The repo ships `secrets/secrets.example.json` only as a format reference.)
 
   You can also pass it via the `DRIVECAST_TMDB_API_KEY` environment variable.
   Keys are **never** written back into `config.json`, so they can't leak there.

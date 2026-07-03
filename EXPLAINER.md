@@ -140,10 +140,12 @@ quietly closes the matching connection to Google.
 1. You click a poster in the browser. If you've watched part of it before, a
    dialog asks **"Resume from 42:10, or start over?"**
 2. The browser tells drivecast: "play file `abc123`, resume at 2530 seconds."
-3. drivecast looks for a player on your Mac, in order of preference:
-   **mpv** (best) → **IINA** (a Mac app built on mpv) → **VLC**. Today your
-   Mac has VLC, so VLC opens. (The UI shows a gentle banner suggesting
-   `brew install mpv` — read on for why.)
+3. drivecast picks a player. By default it auto-detects in order of preference:
+   **mpv** (best) → **IINA** (a Mac app built on mpv) → **VLC**. You can also
+   force a specific one in **Settings → Video player** (the dropdown shows which
+   are installed) — e.g. choose **VLC** if you'd rather play there. Whichever it
+   is, drivecast just hands it the local stream URL; VLC plays it via its own
+   network-streaming (requesting byte-ranges) exactly like mpv.
 4. The player is launched with the local stream URL and told to start at
    42:10. It makes its first Range request, drivecast relays it, and the
    movie appears within a few seconds.

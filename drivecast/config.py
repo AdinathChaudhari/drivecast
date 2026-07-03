@@ -1,15 +1,25 @@
-"""Configuration: merge config.json over defaults, auto-create on first run."""
+"""Configuration: merge config.json over defaults, auto-create on first run.
+
+Config, data and secrets live in a STABLE per-user directory
+(~/Library/Application Support/drivecast) rather than inside the repo/app
+bundle. This means the packaged .app can read the user's TMDB key and selected
+drives, and rebuilding/reinstalling the bundle never wipes them. Only the
+first-run example config is read from the repo.
+"""
 import json
 import os
 import shutil
 import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CONFIG_PATH = os.path.join(REPO_ROOT, "config.json")
+# Stable user directory that survives app rebuilds and is writable by the bundle.
+USER_DIR = os.path.expanduser("~/Library/Application Support/drivecast")
+CONFIG_PATH = os.path.join(USER_DIR, "config.json")
+# First-run template still ships in the repo.
 EXAMPLE_PATH = os.path.join(REPO_ROOT, "config.example.json")
-DATA_DIR = os.path.join(REPO_ROOT, "data")
+DATA_DIR = os.path.join(USER_DIR, "data")
 POSTERS_DIR = os.path.join(DATA_DIR, "posters")
-SECRETS_PATH = os.path.join(REPO_ROOT, "secrets", "secrets.json")
+SECRETS_PATH = os.path.join(USER_DIR, "secrets", "secrets.json")
 
 # Secret settings: resolved from env vars / secrets/secrets.json, NEVER written
 # back to config.json and NEVER committed (secrets/ is gitignored). This keeps
@@ -61,6 +71,7 @@ def _ensure_config_file():
     if os.path.exists(CONFIG_PATH):
         return
     try:
+        os.makedirs(USER_DIR, exist_ok=True)
         if os.path.exists(EXAMPLE_PATH):
             shutil.copyfile(EXAMPLE_PATH, CONFIG_PATH)
         else:
@@ -92,8 +103,8 @@ def save_config(cfg):
         if k in cfg:
             out[k] = cfg[k]
     try:
-        os.makedirs(REPO_ROOT, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=REPO_ROOT, prefix=".config-", suffix=".tmp")
+        os.makedirs(USER_DIR, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=USER_DIR, prefix=".config-", suffix=".tmp")
         with os.fdopen(fd, "w") as f:
             json.dump(out, f, indent=2)
         os.replace(tmp, CONFIG_PATH)

@@ -83,6 +83,59 @@ close the terminal). Your player keeps playing independently — drivecast is on
 needed to start playback and feed the stream, so quitting it stops new plays but
 doesn't kill a movie already open in mpv/VLC.
 
+## Menu-bar app / building `drivecast.app`
+
+Prefer no terminal? drivecast ships a native macOS **menu-bar app**. It runs the
+same server in-process and puts a small **☁** icon in your menu bar:
+
+- a status line — `drivecast: running on :8737` (or `setup needed` if rclone
+  isn't configured yet — the server still starts and shows its setup page)
+- **Open drivecast** — opens `http://127.0.0.1:8737/` in your browser
+- **Quit** — cleanly shuts the server down and exits
+
+If drivecast is already running when you launch it again, it just opens the
+existing instance in your browser and exits (it won't start a second server).
+
+### Requirements
+
+rclone must be set up on the machine (see **Setup** above) — the app reads the
+Drive token from your rclone config exactly like `app.py` does. A player
+(mpv / IINA / VLC) is needed to actually play video; mpv is recommended for
+resume tracking (`brew install mpv`).
+
+### Build the bundle
+
+```sh
+cd drivecast
+./venv/bin/pip install rumps py2app        # runtime + build deps
+./venv/bin/python setup_app.py py2app
+```
+
+The bundle is written to **`dist/drivecast.app`**.
+
+### Install & launch
+
+- Drag **`dist/drivecast.app`** to **/Applications**.
+- Launch it from **Spotlight** (⌘-Space → "drivecast") or the Applications
+  folder / Dock. It's a menu-bar agent (`LSUIElement`), so it shows a ☁ in the
+  menu bar rather than a Dock icon.
+- **Quit** from the menu-bar dropdown → **Quit**.
+
+> The bundled app uses drivecast's built-in defaults (remote `gdrive1`, port
+> `8737`). To customise those for the bundled app, edit `config.json` and run
+> from source, or rebuild after changing the defaults.
+
+### Run without building (quick test)
+
+You can run the menu-bar app straight from source — this uses your repo's
+`config.json`:
+
+```sh
+./venv/bin/python drivecast_menubar.py
+```
+
+Set `DRIVECAST_NO_BROWSER=1` to skip auto-opening the browser.
+
 ## Using the app (everyday flow)
 
 Once `app.py` is running and the library opens in your browser:

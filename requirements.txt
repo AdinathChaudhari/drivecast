@@ -1,6 +1,8 @@
 fastapi
 uvicorn
 httpx
+rumps          # menu-bar app (drivecast_menubar.py / drivecast.app)
 
 # dev extras:
 #   pytest
+#   py2app       (build-only; see requirements-dev.txt and the README build section)

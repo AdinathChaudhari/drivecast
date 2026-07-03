@@ -82,7 +82,9 @@ def create_app(cfg=None):
         state = app.state.dc
         if state.setup_error:
             return HTMLResponse(_setup_page(state.setup_error))
-        with open(os.path.join(STATIC_DIR, "index.html")) as f:
+        # Read as UTF-8 explicitly: inside a packaged .app the process locale can
+        # default to ASCII, which would choke on the page's unicode glyphs.
+        with open(os.path.join(STATIC_DIR, "index.html"), encoding="utf-8") as f:
             return HTMLResponse(f.read())
 
     # ---- API ----

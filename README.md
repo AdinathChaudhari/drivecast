@@ -24,6 +24,19 @@ folder. Bonus-material subfolders (`Featurettes`, `Extras`, `Behind the Scenes`,
 stripped from titles. TV shows (season subfolders or episode-marked files) are
 still detected and kept as a single show tile.
 
+**Robust season detection.** Season subfolders survive messy release naming.
+Beyond `Season 1` / `S01`, drivecast de-noises a folder name (dropping bracketed
+groups and quality tokens) and reads a *leading* `S<number>`, so real-world
+folders like `S01 (2017) 1080p 10bit HEVC NF WEBRip x265 [ENGLISH - SPANISH]`
+and `S05 Part 1 (2021) …` group correctly (e.g. Money Heist → one show,
+seasons 1–5). The short form is anchored to the start, so a title that merely
+contains an S-number mid-string is never mistaken for a season.
+
+**Quality pills.** Each tile shows a small pill with the video quality parsed
+from the filename — `4K`, `1080p`, `720p` or `SD` (with an optional `HDR` / `DV`
+suffix). Movies show their file's quality; a show tile shows the **best**
+quality available across its episodes. The pill also appears on the detail view.
+
 > drivecast is strictly **read-only** on Google Drive — it never deletes, trashes
 > or moves anything. Only the local cache (posters/temp) is written.
 
@@ -82,13 +95,17 @@ brew install mpv
 
 mpv (and IINA) expose a JSON IPC socket that drivecast polls to save your
 playback position, powering the **Continue Watching** shelf and resume prompts.
-VLC works too but has no resume tracking — you'll see a banner suggesting mpv.
+**VLC is tracked too**, via its built-in HTTP interface — drivecast launches VLC
+with a private loopback HTTP server and polls its status for your position, so
+resume and Continue Watching work in VLC as well. mpv stays the recommended
+default (it needs no extra interface); if VLC's HTTP interface can't start
+(older build, busy port), playback still works, just launch-only.
 
 **Choosing a player.** By default drivecast auto-picks mpv → IINA → VLC. To force
 one, use **Settings → Video player** in the app (it shows which players are
 installed), or set `"player"` in `config.json` to `auto` / `mpv` / `iina` / `vlc`.
-Playback works the same in any of them (VLC streams the local URL by requesting
-byte-ranges, just like mpv); only mpv/IINA report your position back for resume.
+Playback works the same in any of them (each streams the local URL by requesting
+byte-ranges); all three now report your position back for resume.
 
 ### 4. (Optional) TMDB posters
 
@@ -136,8 +153,9 @@ existing instance in your browser and exits (it won't start a second server).
 
 rclone must be set up on the machine (see **Setup** above) — the app reads the
 Drive token from your rclone config exactly like `app.py` does. A player
-(mpv / IINA / VLC) is needed to actually play video; mpv is recommended for
-resume tracking (`brew install mpv`).
+(mpv / IINA / VLC) is needed to actually play video; all three support resume
+tracking (VLC via its HTTP interface), with mpv the recommended default
+(`brew install mpv`).
 
 ### Build the bundle
 
@@ -188,8 +206,11 @@ Once `app.py` is running and the library opens in your browser:
    time normal use touches the Google API; it's throttled and retries on rate
    limits, so it's safe to leave running.
 3. **Browse the library.** The home screen shows a **Continue Watching** shelf on
-   top, then your library as a grid of movie/show tiles with posters. Filter by
-   **All / Movies / TV Shows**, and use the search box for an instant,
+   top, then your library as a grid of movie/show tiles with posters (each with a
+   quality pill). Filter by **All / Movies / TV Shows**; **Sort** by Title,
+   Year, Recently added, or Recently watched; and **Group** by nothing, by type
+   (Movies / TV Shows), or by drive. Sort/group happen instantly client-side over
+   the cached data and your choice is remembered. The search box does an instant,
    offline search over the cached library.
 4. **Open a title.** Click a movie tile for its detail page (poster, overview,
    **Play**). Click a show tile for its detail page with a **season selector** and
@@ -198,11 +219,11 @@ Once `app.py` is running and the library opens in your browser:
    couple of seconds (duration/size come from the cache, so there's no blocking
    metadata call). Seek anywhere — only the bytes you watch are fetched. If you've
    watched this file before, you'll first be asked **Resume / Start over**.
-6. **Continue Watching.** With **mpv** (or IINA), drivecast tracks your position
-   automatically, so partly-watched titles (including the right *episode* of a
-   show) reappear on the home shelf and resume where you left off. With **VLC**
-   playback works fully but position isn't tracked — that's the only reason the
-   app nudges you toward `brew install mpv`.
+6. **Continue Watching.** With **mpv**, **IINA** *or* **VLC**, drivecast tracks
+   your position automatically (VLC via its HTTP interface), so partly-watched
+   titles (including the right *episode* of a show) reappear on the home shelf and
+   resume where you left off. mpv stays the recommended default; if VLC's HTTP
+   interface can't start, playback still works, just without resume tracking.
 7. **Refresh.** When you add or remove content on the drives, click **Refresh**
    (top bar) or the menu-bar **Refresh library** item. drivecast rescans, adds
    new titles, removes deleted ones, updates show episode lists, and backfills

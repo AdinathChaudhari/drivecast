@@ -149,18 +149,20 @@ quietly closes the matching connection to Google.
 4. The player is launched with the local stream URL and told to start at
    42:10. It makes its first Range request, drivecast relays it, and the
    movie appears within a few seconds.
-5. If the player is **mpv**, drivecast also opens a tiny side-channel: mpv
-   can expose a "remote control socket" where you can ask it questions. A
-   background thread asks *"what's the current playback time?"* every 3
-   seconds and writes the answer into a small history file. That's how
-   resume positions and the Continue Watching shelf stay accurate to within
-   ~3 seconds — even if you force-quit the player.
+5. drivecast also opens a tiny side-channel to read the current playback time.
+   **mpv / IINA** expose a "remote control socket"; **VLC** exposes an HTTP
+   interface (drivecast launches VLC with a private loopback HTTP server on a
+   spare port and a random password). Either way a background thread asks
+   *"what's the current playback time?"* every 3 seconds and writes the answer
+   into a small history file — so resume positions and the Continue Watching
+   shelf stay accurate to within ~3 seconds, even if you force-quit the player.
 6. When you quit, the final position is saved. If you were past 90 % of the
    movie, it's marked **watched** and drops off Continue Watching.
 
-VLC, unfortunately, has no comparably simple side-channel — so with VLC you
-get full streaming and seeking, but drivecast can't *see* where you stopped.
-That's the one real reason the app nudges you toward mpv.
+All three players (mpv, IINA, VLC) therefore support resume. mpv stays the
+recommended default because it needs no extra interface; if VLC's HTTP interface
+can't start (an older build, or the port is busy), drivecast quietly degrades to
+launch-only for that session and everything else still works.
 
 ---
 
@@ -185,7 +187,13 @@ classifies each folder **recursively**:
   season subfolders) carry episode markers (`S01E02`, `2x05`, `Episode 3`, `E04`).
   A show becomes **one tile**: its descendant videos are grouped into seasons
   (from the subfolder name, else the `SxxExx` marker, else season 1) and sorted by
-  episode number.
+  episode number. Season-folder detection de-noises the folder name first
+  (dropping bracketed groups and quality tokens) and reads a *leading* `S<number>`,
+  so gnarly real-world names like `S01 (2017) 1080p 10bit HEVC NF WEBRip x265
+  [ENGLISH - SPANISH]` and `S05 Part 1 (2021) …` still resolve to seasons 1 and 5
+  (this is why *Money Heist* comes through as one show, seasons 1–5). The short
+  form is anchored to the start, so a title merely containing an S-number
+  mid-string is never mistaken for a season.
 - Otherwise the folder **expands into movies**, recursing down the tree so each
   film is its own tile:
   - A **leaf movie folder** with one main video becomes one movie titled from the
@@ -222,10 +230,21 @@ Quality noise in folder names (`Season 1 (480p DVD)`,
 whole-series wrapper named as a range (`Season 1-9 S01-s09`) is left as-is.
 
 The result is written to **`data/library.json`** (atomically) as structured
-records — title, year, type, and for shows the full season/episode tree, with
-each file's size and **duration** pulled straight from the list response so
-playback later needs no extra metadata call. From then on the home grid, detail
-pages, seasons and episodes all render from this file: **zero API calls**.
+records — title, year, type, a parsed **quality** label, an **`added_at`**
+timestamp, and for shows the full season/episode tree, with each file's size and
+**duration** pulled straight from the list response so playback later needs no
+extra metadata call. From then on the home grid, detail pages, seasons and
+episodes all render from this file: **zero API calls**.
+
+**Quality pills.** Each record stores a short quality label parsed from the
+filename — `4K` / `1080p` / `720p` / `SD`, with an optional `HDR` / `DV` suffix.
+A movie takes its video-file's quality (folder-name fallback); a show takes the
+**best** quality across its episodes, so the tile advertises the best copy you
+have. The UI renders it as a small pill in the poster's top-right corner.
+
+**`added_at`.** Each title is stamped with the epoch second it was first seen and
+keeps that value across refreshes (carried over like poster metadata), so the
+"Recently added" sort is stable.
 
 **Refresh diffing.** A refresh rescans and diffs against the existing library:
 newly-found titles are added, titles whose files are gone are removed (and their
@@ -245,6 +264,16 @@ placeholder** with the title and year. TMDB is purely additive.
 library client-side. The old server-side `corpora=allDrives` search (one query
 across all drives at Google) still backs the demoted **Browse files** view, along
 with the original live folder browser.
+
+**Sorting & grouping.** Above the grid, **Sort** (Title A–Z / Year newest /
+Recently added / Recently watched) and **Group** (None / By type / By drive)
+dropdowns reshape the library entirely **client-side** over the already-cached
+`/api/library` data — no extra API load — and the chosen sort/group persists in
+`localStorage`. "Recently added" reads each record's `added_at`; "Recently
+watched" joins a small `/api/watched-map` (file id → last-played, including
+finished titles the Continue Watching shelf omits); "By drive" maps drive ids to
+names via the cached `/api/drives`. Each group renders under its own header,
+reusing the same tile grid.
 
 `library.json`, the posters, and the watch-history JSON are the *only* things
 drivecast writes to disk (a few MB in `data/`). Video bytes: never.
@@ -279,9 +308,9 @@ drivecast/
     ├── drive_api.py       # talks to Google: list drives, browse, search — with rate-limit backoff
     ├── library.py         # the cache: recursive scan/classify drives → library.json, diff, posters (section 6)
     ├── streaming.py       # the stream proxy / relay (section 4) — the heart
-    ├── player.py          # finds mpv/IINA/VLC, launches it (with cache/hwdec flags), mpv poller (section 5)
-    ├── history.py         # history.json: positions, watched flags, Continue Watching
-    ├── naming.py          # filename/folder → clean {title, year, season/episode}; enum-prefix + extras helpers
+    ├── player.py          # finds mpv/IINA/VLC, launches it (with cache/hwdec flags), mpv IPC + VLC HTTP pollers (section 5)
+    ├── history.py         # history.json: positions, watched flags, Continue Watching, watched-map
+    ├── naming.py          # filename/folder → clean {title, year, season/episode, quality}; season/enum/extras helpers
     ├── tmdb.py            # poster fetching + caching (pre-cached/backfilled during the scan)
     ├── server.py          # the web API: /api/library, /api/title, /api/refresh, /api/settings, /stream, …
     └── static/            # the library UI: one HTML page, one JS file, one CSS file
@@ -336,11 +365,13 @@ box at the top. drivecast asks Google to search *all* your drives at once, so a
 film buried three folders deep in some drive you forgot about shows up in a
 couple of seconds. Click the result to play.
 
-**Continue Watching** only truly works if your player is **mpv** (or IINA),
-because those let drivecast peek at your current position every few seconds. If
-you're on **VLC**, everything plays and seeks perfectly — you just won't get the
-resume shelf, because VLC won't tell drivecast where you stopped. That single
-limitation is the only reason the app suggests `brew install mpv`.
+**Continue Watching** works on **mpv**, **IINA** *and* **VLC** — each lets
+drivecast peek at your current position every few seconds (mpv/IINA over their
+control socket, VLC over its HTTP interface), so partly-watched titles reappear
+on the resume shelf and pick up where you left off. mpv stays the recommended
+default (it needs no extra interface); on the rare VLC where the HTTP interface
+can't start, playback still works, just without the resume shelf for that
+session — which is the only reason the app still suggests `brew install mpv`.
 
 **Posters.** Out of the box you'll see tidy placeholder cards (title + year on a
 gradient). If you drop a free **TMDB API key** into `secrets/secrets.json` (see

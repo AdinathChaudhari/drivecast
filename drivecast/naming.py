@@ -22,6 +22,16 @@ _QUALITY_SORTED = sorted(QUALITY_TOKENS, key=len, reverse=True)
 _QUALITY_ALT = "|".join(re.escape(t) for t in _QUALITY_SORTED)
 _QUALITY_RE = re.compile(r"(?<![a-z0-9])(?:%s)(?![a-z0-9])" % _QUALITY_ALT, re.IGNORECASE)
 
+# Video-quality detection (for the poster "pill"). Resolution is matched with
+# alnum guards so "1080p" isn't found inside another token. HDR / Dolby Vision
+# are optional dynamic-range suffixes appended to the label.
+_Q_2160_RE = re.compile(r"(?<![a-z0-9])(?:2160p|4k|uhd)(?![a-z0-9])", re.IGNORECASE)
+_Q_1080_RE = re.compile(r"(?<![a-z0-9])1080p(?![a-z0-9])", re.IGNORECASE)
+_Q_720_RE = re.compile(r"(?<![a-z0-9])720p(?![a-z0-9])", re.IGNORECASE)
+_Q_SD_RE = re.compile(r"(?<![a-z0-9])(?:480p|576p)(?![a-z0-9])", re.IGNORECASE)
+_HDR_RE = re.compile(r"(?<![a-z0-9])hdr10\+?|(?<![a-z0-9])hdr(?![a-z0-9])", re.IGNORECASE)
+_DV_RE = re.compile(r"(?<![a-z0-9])(?:dolby[ ._-]?vision|dovi|dv)(?![a-z0-9])", re.IGNORECASE)
+
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 _SXXEXX_RE = re.compile(r"\bS(\d{1,2})[\s._-]?E(\d{1,3})\b", re.IGNORECASE)
 _NXNN_RE = re.compile(r"\b(\d{1,2})x(\d{1,3})\b", re.IGNORECASE)
@@ -30,7 +40,11 @@ _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".wmv", ".flv", ".webm", 
 
 # Season folder names: "Season 1", "Season 01", "Series 2", "S01", "S1".
 _SEASON_WORD_RE = re.compile(r"\b(?:season|series)\s*0*(\d+)\b", re.IGNORECASE)
-_SEASON_SHORT_RE = re.compile(r"^\s*s0*(\d+)\s*$", re.IGNORECASE)
+# A LEADING short season token: "S01", "S1", and also noisy release folders like
+# "S01 (2017) 1080p ..." or "S05 Part 1 (2021) ...". Anchored to the start so a
+# real title that merely contains an S-number mid-string (e.g. "Terminator 2")
+# is never misread as a season.
+_SEASON_LEAD_RE = re.compile(r"^\s*s0*(\d+)\b", re.IGNORECASE)
 # Episode markers beyond SxxExx / NxNN.
 _EPISODE_WORD_RE = re.compile(r"\bepisode\s*0*(\d+)\b", re.IGNORECASE)
 _EP_SHORT_RE = re.compile(r"\bE0*(\d+)\b", re.IGNORECASE)
@@ -126,22 +140,79 @@ def is_sample(name):
     return bool(_SAMPLE_RE.search(name or ""))
 
 
-def season_from_folder(name):
-    """Return a season number from a folder name, else None.
+def detect_quality(name):
+    """Return a short quality label for a filename/folder, else None.
 
-    Matches "Season 1", "Series 2", "S01", "S1", and treats a "Specials"
-    folder as season 0.
+    Resolution (priority high->low): 2160p/4K/UHD -> "4K"; 1080p -> "1080p";
+    720p -> "720p"; 480p/576p -> "SD". A dynamic-range suffix is appended when
+    present: "4K HDR", "1080p DV". HDR wins over DV when both appear (rare).
     """
     if not name:
         return None
-    if name.strip().lower() == "specials":
+    if _Q_2160_RE.search(name):
+        base = "4K"
+    elif _Q_1080_RE.search(name):
+        base = "1080p"
+    elif _Q_720_RE.search(name):
+        base = "720p"
+    elif _Q_SD_RE.search(name):
+        base = "SD"
+    else:
+        return None
+    if _HDR_RE.search(name):
+        base += " HDR"
+    elif _DV_RE.search(name):
+        base += " DV"
+    return base
+
+
+# Rank quality labels so a show tile can advertise the best available episode.
+_QUALITY_RANK = {"SD": 1, "720p": 2, "1080p": 3, "4K": 4}
+
+
+def quality_rank(label):
+    """Numeric rank of a quality label (higher = better); 0 for None/unknown."""
+    if not label:
         return 0
-    m = _SEASON_WORD_RE.search(name)
+    return _QUALITY_RANK.get(label.split()[0], 0)
+
+
+def best_quality(names):
+    """Best quality label across an iterable of filenames, else None."""
+    best, best_rank = None, 0
+    for n in names:
+        q = detect_quality(n)
+        r = quality_rank(q)
+        if r > best_rank:
+            best, best_rank = q, r
+    return best
+
+
+def season_from_folder(name):
+    """Return a season number from a folder name, else None.
+
+    Handles clean names ("Season 1", "Series 2", "S01", "S1", "Specials") and
+    noisy release-style folders. The name is de-noised first (brackets + quality
+    tokens stripped) so real-world seasons survive their junk:
+      * "S01 (2017) 1080p 10bit HEVC NF WEBRip x265 [ENG - SPA] AAC 5.1" -> 1
+      * "S05 Part 1 (2021) 1080p NF WEBRip x264 [SPANISH] DDP5.1 Atmos"   -> 5
+    Priority: "Season|Series N", then a LEADING "S<number>", then "Specials".
+    The short form is anchored to the start so a title merely containing an
+    S-number mid-string is not mistaken for a season.
+    """
+    if not name:
+        return None
+    t = _strip_folder_noise(name)
+    if not t:
+        return None
+    m = _SEASON_WORD_RE.search(t)
     if m:
         return int(m.group(1))
-    m = _SEASON_SHORT_RE.match(name)
+    m = _SEASON_LEAD_RE.match(t)
     if m:
         return int(m.group(1))
+    if t.strip().lower() == "specials":
+        return 0
     return None
 
 

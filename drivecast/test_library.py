@@ -214,6 +214,61 @@ def test_diff_add_remove():
     assert removed == ["a"]
 
 
+def test_movie_record_has_quality_from_filename():
+    n = node("Some Folder", [vid("v1", "Arrival.2016.2160p.UHD.BluRay.mkv")])
+    rec = only(library.classify_node(n))
+    assert rec["quality"] == "4K"
+
+
+def test_movie_record_quality_falls_back_to_folder_name():
+    # No quality in the file name, but the folder carries it.
+    n = node("Arrival (2016) 1080p BluRay", [vid("v1", "Arrival.mkv")])
+    rec = only(library.classify_node(n))
+    assert rec["quality"] == "1080p"
+
+
+def test_show_record_uses_best_episode_quality():
+    s1 = node("Season 1", [
+        vid("e1", "Show.S01E01.720p.mkv", ancestors=["Show", "Season 1"]),
+        vid("e2", "Show.S01E02.1080p.mkv", ancestors=["Show", "Season 1"]),
+        vid("e3", "Show.S01E03.480p.mkv", ancestors=["Show", "Season 1"]),
+    ], fid="s1")
+    rec = only(library.classify_node(node("Show", [], subfolders=[s1])))
+    assert rec["type"] == "show"
+    assert rec["quality"] == "1080p"   # best of 720p/1080p/480p
+
+
+def test_loose_records_carry_quality():
+    loose = [
+        rawfile("e1", "The Office S03E01 2160p.mkv"),
+        rawfile("e2", "The Office S03E02 720p.mkv"),
+        rawfile("m1", "Whiplash 2014 1080p.mkv"),
+    ]
+    recs = library.classify_loose("drv1", loose)
+    show = next(r for r in recs if r["type"] == "show")
+    movie = next(r for r in recs if r["type"] == "movie")
+    assert show["quality"] == "4K"      # best across the two episodes
+    assert movie["quality"] == "1080p"
+
+
+def test_grouped_show_carries_best_member_quality():
+    m1 = _showrec("b1", "dBL", "Blackadder Season 1 S01", 1, 2)
+    m1["quality"] = "SD"
+    m2 = _showrec("b2", "dBL", "Blackadder Season 2 S02", 2, 2)
+    m2["quality"] = "1080p"
+    out = library.group_seasons([m1, m2], {"dBL": "TV | Blackadder"})
+    assert len(out) == 1
+    assert out[0]["quality"] == "1080p"
+
+
+def test_assign_added_at_sets_and_preserves():
+    old = {"a": {"id": "a", "added_at": 100.0}}
+    new = {"a": {"id": "a"}, "b": {"id": "b"}}
+    library.assign_added_at(old, new, now=555.0)
+    assert new["a"]["added_at"] == 100.0   # preserved for existing title
+    assert new["b"]["added_at"] == 555.0   # stamped for newly-added title
+
+
 def test_merge_existing_metadata_carries_poster():
     old = {"a": {"id": "a", "poster": "p.jpg", "tmdb_id": 5, "overview": "o"}}
     new = {"a": {"id": "a", "poster": None, "tmdb_id": None, "overview": None}}

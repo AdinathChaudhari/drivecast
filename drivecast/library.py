@@ -160,6 +160,8 @@ def _show_record(node):
     if not videos:
         return None
     title, year = naming.clean_title(node["name"])
+    # Best quality across all episodes so the tile advertises the best available.
+    quality = naming.best_quality(v["name"] for v in videos) or naming.detect_quality(node["name"])
     return {
         "id": node["id"],
         "type": "show",
@@ -170,6 +172,7 @@ def _show_record(node):
         "poster": None,
         "tmdb_id": None,
         "overview": None,
+        "quality": quality,
         # Raw folder name kept transiently so the season-grouping pass can detect
         # "<Show> Season N" / bare "Season N" siblings. Stripped before persisting.
         "_folder_name": node["name"],
@@ -180,6 +183,8 @@ def _show_record(node):
 def _movie_record(node, video, from_folder):
     """One movie record for a single video; title from the folder or the file."""
     title, year = naming.clean_title(node["name"] if from_folder else video["name"])
+    # Quality from the video filename; fall back to the folder name.
+    quality = naming.detect_quality(video["name"]) or naming.detect_quality(node["name"])
     return {
         "id": video["id"],
         "type": "movie",
@@ -190,6 +195,7 @@ def _movie_record(node, video, from_folder):
         "poster": None,
         "tmdb_id": None,
         "overview": None,
+        "quality": quality,
         "file_id": video["id"],
         "size": video["size"],
         "duration_ms": video["duration_ms"],
@@ -278,6 +284,7 @@ def classify_loose(drive_id, loose_files):
             "poster": None,
             "tmdb_id": None,
             "overview": None,
+            "quality": naming.best_quality(f.get("name") or "" for f in files),
             "seasons": _group_episodes(vids, show_title),
         })
     for f in movies:
@@ -293,6 +300,7 @@ def classify_loose(drive_id, loose_files):
             "poster": None,
             "tmdb_id": None,
             "overview": None,
+            "quality": naming.detect_quality(f.get("name") or ""),
             "file_id": v["id"],
             "size": v["size"],
             "duration_ms": v["duration_ms"],
@@ -392,8 +400,12 @@ def group_seasons(records, drive_names):
     for key in order:
         g = groups[key]
         buckets = {}
+        best_q, best_q_rank = None, 0
         for season_num, rec in g["members"]:
             buckets.setdefault(season_num, []).extend(_episodes_of(rec, season_num))
+            r = naming.quality_rank(rec.get("quality"))
+            if r > best_q_rank:
+                best_q, best_q_rank = rec.get("quality"), r
         seasons = []
         for s in sorted(buckets):
             eps = buckets[s]
@@ -410,6 +422,7 @@ def group_seasons(records, drive_names):
             "poster": None,
             "tmdb_id": None,
             "overview": None,
+            "quality": best_q,
             "seasons": seasons,
         })
 
@@ -448,6 +461,23 @@ def merge_existing_metadata(old_titles, new_titles):
         for k in ("poster", "tmdb_id", "overview"):
             if old.get(k) and not rec.get(k):
                 rec[k] = old[k]
+
+
+def assign_added_at(old_titles, new_titles, now=None):
+    """Stamp each new record with an ``added_at`` epoch-seconds timestamp.
+
+    Existing titles keep the timestamp they were first seen (carried over like
+    poster metadata); freshly-added titles get ``now``. Powers the "Recently
+    added" sort in the UI.
+    """
+    if now is None:
+        now = time.time()
+    for tid, rec in new_titles.items():
+        old = old_titles.get(tid)
+        if old and old.get("added_at"):
+            rec["added_at"] = old["added_at"]
+        elif not rec.get("added_at"):
+            rec["added_at"] = now
 
 
 def prune_removed_posters(old_titles, new_titles, removed_ids):
@@ -705,6 +735,7 @@ class Scanner:
             old_titles = self.library.snapshot_titles()
             added, removed = diff_library(old_titles, new_titles)
             merge_existing_metadata(old_titles, new_titles)
+            assign_added_at(old_titles, new_titles)
 
             self.status["added"] = len(added)
 

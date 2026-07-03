@@ -73,6 +73,54 @@ def test_season_from_folder(folder, season):
     assert naming.season_from_folder(folder) == season
 
 
+@pytest.mark.parametrize("folder,season", [
+    # Real "Money Heist" season folders: leading S<number> buried in release junk.
+    ("S01 (2017) 1080p 10bit HEVC NF WEBRip x265 [ENGLISH - SPANISH] AAC 5.1", 1),
+    ("S02 (2017) 1080p 10bit HEVC NF WEBRip x265 [ENGLISH - SPANISH] AAC 5.1", 2),
+    ("S04 (2020) 1080p 10bit HEVC NF WEBRip x265 [ENGLISH - SPANISH] AAC 5.1", 4),
+    ("S05 Part 1 (2021) 1080p NF WEBRip x264 [SPANISH] DDP5.1 Atmos", 5),
+    ("Season 3 (480p DVD)", 3),
+    # Must NOT misfire on real titles that merely contain an S-number mid-string.
+    ("Terminator 2 (1991) 1080p", None),
+    ("The Sopranos", None),
+    ("S.W.A.T. (2003)", None),
+    ("Se7en (1995)", None),
+])
+def test_season_from_folder_noisy(folder, season):
+    assert naming.season_from_folder(folder) == season
+
+
+@pytest.mark.parametrize("name,label", [
+    ("Movie.2160p.BluRay.x265.mkv", "4K"),
+    ("Movie.4K.UHD.mkv", "4K"),
+    ("Show.S01E01.UHD.mkv", "4K"),
+    ("Inception.2010.1080p.BluRay.mkv", "1080p"),
+    ("The.Office.S03E01.720p.mkv", "720p"),
+    ("Old.Show.480p.mkv", "SD"),
+    ("Classic.576p.PAL.mkv", "SD"),
+    ("Dune.2021.2160p.HDR.mkv", "4K HDR"),
+    ("Movie.2160p.HDR10.mkv", "4K HDR"),
+    ("Film.1080p.DV.mkv", "1080p DV"),
+    ("Movie.1080p.Dolby.Vision.mkv", "1080p DV"),
+    # No resolution token -> no pill.
+    ("Random Home Video.mkv", None),
+    ("The Matrix 1999.mkv", None),
+    # "DVD"/"DVDRip" must not be read as Dolby Vision.
+    ("Movie.1080p.DVDRip.mkv", "1080p"),
+    ("", None),
+])
+def test_detect_quality(name, label):
+    assert naming.detect_quality(name) == label
+
+
+def test_best_quality_picks_highest():
+    assert naming.best_quality([
+        "Ep.720p.mkv", "Ep.1080p.mkv", "Ep.480p.mkv",
+    ]) == "1080p"
+    assert naming.best_quality(["a.mkv", "b.mkv"]) is None
+    assert naming.best_quality(["Ep.720p.mkv", "Ep.2160p.HDR.mkv"]) == "4K HDR"
+
+
 @pytest.mark.parametrize("name,ep", [
     ("Show.S01E07.mkv", 7),
     ("Show 2x09.mkv", 9),

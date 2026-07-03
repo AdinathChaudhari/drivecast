@@ -162,45 +162,72 @@ That's the one real reason the app nudges you toward mpv.
 
 ---
 
-## 6. Browsing, search, and posters
+## 6. The library cache (and browsing, search, posters)
 
-**Browsing** a folder is one call to Google's `files.list` API, asking for
-just folders and files whose type starts with `video/` (so your `.aria2`
-leftovers, subtitles, and random junk don't clutter the library). Google
-returns names, sizes, and — for free — each video's **duration** and a
-thumbnail, which drivecast reuses. Folders with thousands of files come back
-in pages of 200 with a "Load more" button.
+Early drivecast was a live folder browser: every click was a Google API call.
+That was slow and, on rclone's shared credentials, quick to hit the rate limit.
+The current design flips it around: drivecast keeps a **cached library** and
+serves browsing entirely from disk.
 
-**Search** uses a superpower of the Drive API that would be painfully slow to
-build ourselves: one query with `corpora=allDrives` searches **all 40 Shared
-Drives at once**, server-side at Google, in under a couple of seconds. (The
-rclone-only alternative would have been listing every drive recursively —
-minutes, not seconds.)
+**Selecting drives.** You choose which Shared Drives to include (Settings view or
+the menu-bar **Drives to include** submenu). Only those drives appear; the rest
+are invisible. The choice lives in `config.json` as `selected_drives`.
 
-**Posters** come from three sources, best available wins:
+**The scan.** A scan (first run, on launch if you enabled auto-refresh, or when
+you hit **Refresh**) walks each selected drive's folder tree via `files.list` and
+classifies every top-level folder:
 
-1. **TMDB** (The Movie Database) — *if* you add a free API key to
-   `config.json`. drivecast parses each filename with some heuristics —
-   strip the `1080p WEB-DL x265`-style junk, pull out the year, spot
-   `S01E02` patterns to tell shows from movies — then asks TMDB for the real
-   poster and caches it locally.
-2. **Google's own thumbnail** for the video, if TMDB is off or finds nothing.
-3. A clean **gradient placeholder card** showing the parsed title and year.
+- A folder is a **TV show** if it has season-named subfolders (`Season 1`, `S01`,
+  `Series 2`, …) **or** ≥2 episode-named videos (`S01E02`, `2x05`, `Episode 3`,
+  `E04`). Episodes are grouped into seasons (from the subfolder name, else the
+  `SxxExx` marker, else season 1) and sorted by episode number.
+- Otherwise it's a **movie**, whose main file is the largest video in the folder
+  (`sample`/`trailer`/`featurette`/`extra` files are ignored).
+- Loose videos sitting at a drive's root are parsed by filename: `SxxExx` files
+  group into a show; everything else is a standalone movie.
 
-Posters and the watch-history JSON are the *only* things drivecast ever
-writes to disk (a few MB in `data/`). Video bytes: never.
+The result is written to **`data/library.json`** (atomically) as structured
+records — title, year, type, and for shows the full season/episode tree, with
+each file's size and **duration** pulled straight from the list response so
+playback later needs no extra metadata call. From then on the home grid, detail
+pages, seasons and episodes all render from this file: **zero API calls**.
+
+**Refresh diffing.** A refresh rescans and diffs against the existing library:
+newly-found titles are added (and their posters fetched), titles whose files are
+gone are removed (and their now-orphaned posters deleted), and show episode lists
+are updated in place. A `/api/refresh/status` endpoint drives the progress bar.
+
+**Posters, pre-cached.** During the scan, each *new* title is resolved against
+**TMDB** (movie vs TV, by title+year, if you set an API key), its w342 poster is
+downloaded to `data/posters/`, and the local path is stored in the record — so
+tiles load instantly from disk with no per-card lookup. Negative results are
+cached too. No key or no match → a clean **gradient placeholder** with the title
+and year. TMDB is purely additive.
+
+**Search** is now instant and offline: the home search box filters the cached
+library client-side. The old server-side `corpora=allDrives` search (one query
+across all drives at Google) still backs the demoted **Browse files** view, along
+with the original live folder browser.
+
+`library.json`, the posters, and the watch-history JSON are the *only* things
+drivecast writes to disk (a few MB in `data/`). Video bytes: never.
 
 ---
 
 ## 7. The one external annoyance: shared rate limits
 
 rclone's built-in Google credentials are shared by every rclone user in the
-world, so Google enforces a per-minute query quota on them. If you browse
-very fast (or run automated tests), you can briefly hit a **"rate limit
-exceeded"** message. drivecast retries with short pauses automatically, and
-the quota resets within a minute — but if you ever see that toast, that's
-what it is. It's an inconvenience, not a bug, and playback itself (few
-requests per second, all lightweight) rarely triggers it.
+world, so Google enforces a tiny per-minute query quota on them. Because normal
+browsing now serves from `data/library.json`, day-to-day use hits the API **zero
+times**; only a scan/refresh talks to Google. That scan is built to survive the
+quota: it throttles between calls and, on a `rateLimitExceeded` / 429 response,
+**backs off exponentially and retries** rather than crashing — and if a single
+folder keeps failing it's skipped so the rest of the scan still completes.
+
+If you routinely scan large drives on the shared credentials you'll still hit the
+limit eventually. The real fix is to put **your own** Google OAuth client
+id/secret into the rclone remote (a free Google Cloud project), which gives you
+your own generous quota. That's configured separately in `rclone config`.
 
 ---
 
@@ -209,16 +236,17 @@ requests per second, all lightweight) rarely triggers it.
 ```
 drivecast/
 ├── app.py                 # entry point: checks rclone works, starts the server, opens browser
-├── config.json            # your settings: remote name, port, TMDB key, player preference
+├── config.json            # your settings: remote, port, TMDB key, player, selected_drives, auto_refresh
 └── drivecast/
     ├── rclone_auth.py     # the keymaster: gets fresh tokens out of rclone (section 3)
-    ├── drive_api.py       # talks to Google: list drives, browse folders, search
+    ├── drive_api.py       # talks to Google: list drives, browse, search — with rate-limit backoff
+    ├── library.py         # the cache: scan/classify drives → data/library.json, diff, posters (section 6)
     ├── streaming.py       # the stream proxy / relay (section 4) — the heart
-    ├── player.py          # finds mpv/IINA/VLC, launches it, mpv remote-control poller (section 5)
+    ├── player.py          # finds mpv/IINA/VLC, launches it (with cache/hwdec flags), mpv poller (section 5)
     ├── history.py         # data/history.json: positions, watched flags, Continue Watching
-    ├── naming.py          # filename → clean {title, year, season/episode}
-    ├── tmdb.py            # optional poster fetching + caching
-    ├── server.py          # the web API glueing all of the above together
+    ├── naming.py          # filename/folder → clean {title, year, season/episode}
+    ├── tmdb.py            # poster fetching + caching (pre-cached during the scan)
+    ├── server.py          # the web API: /api/library, /api/title, /api/refresh, /api/settings, /stream, …
     └── static/            # the library UI: one HTML page, one JS file, one CSS file
 ```
 

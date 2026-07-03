@@ -3,6 +3,10 @@ uvicorn
 httpx
 rumps          # menu-bar app (drivecast_menubar.py / drivecast.app)
 
+# optional:
+#   h2           enables HTTP/2 for the streaming proxy (faster keep-alive);
+#                drivecast falls back to HTTP/1.1 automatically if it's absent.
+
 # dev extras:
 #   pytest
 #   py2app       (build-only; see requirements-dev.txt and the README build section)

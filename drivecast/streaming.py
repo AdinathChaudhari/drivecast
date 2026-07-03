@@ -16,8 +16,16 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 log = logging.getLogger("drivecast.streaming")
 
+# HTTP/2 (multiplexed, better keep-alive) if the optional `h2` package is
+# installed; otherwise fall back to HTTP/1.1 transparently.
+try:
+    import h2  # noqa: F401
+    HTTP2_AVAILABLE = True
+except ImportError:
+    HTTP2_AVAILABLE = False
+
 MEDIA_URL = "https://www.googleapis.com/drive/v3/files/{id}"
-CHUNK_SIZE = 64 * 1024  # 64 KB
+CHUNK_SIZE = 1024 * 1024  # 1 MiB — fewer, larger relays than the old 64 KB
 
 # Header names we relay from upstream to the client.
 RELAY_HEADERS = ("content-range", "content-length", "content-type", "accept-ranges")
@@ -55,9 +63,16 @@ class Streamer:
     def __init__(self, token_manager, drive_api):
         self.tokens = token_manager
         self.api = drive_api
+        # One long-lived client: connection pooling / keep-alive across the many
+        # Range requests a player makes while seeking, instead of a fresh TCP +
+        # TLS handshake per request.
         # read=None: streaming a large file has no overall read deadline;
         # connect has a sane bound.
-        self._client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0))
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0),
+            http2=HTTP2_AVAILABLE,
+            limits=httpx.Limits(max_keepalive_connections=20, keepalive_expiry=60.0),
+        )
 
     async def aclose(self):
         await self._client.aclose()

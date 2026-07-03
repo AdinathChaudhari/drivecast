@@ -26,6 +26,47 @@ VLC_BIN = "/Applications/VLC.app/Contents/MacOS/VLC"
 SOCKET_WAIT_SECONDS = 10.0
 POLL_INTERVAL = 3.0
 
+# Network buffering + hardware decode flags: the file is streamed over HTTP from
+# Drive, so a generous demuxer cache + readahead hides latency and hiccups, and
+# hw decode keeps 4K smooth. These are the biggest playback-speed win.
+MPV_CACHE_FLAGS = [
+    "--cache=yes",
+    "--cache-secs=30",
+    "--demuxer-max-bytes=150MiB",
+    "--demuxer-max-back-bytes=50MiB",
+    "--demuxer-readahead-secs=20",
+    "--hwdec=auto-safe",
+    "--force-seekable=yes",
+    "--network-timeout=30",
+]
+# IINA takes the same options prefixed with --mpv-.
+IINA_CACHE_FLAGS = ["--mpv-" + flag[2:] for flag in MPV_CACHE_FLAGS]
+
+
+def build_mpv_args(path, sock, resume, name, url):
+    """Construct the mpv command line (IPC + resume + title + cache/hwdec)."""
+    return [
+        path,
+        "--input-ipc-server=%s" % sock,
+        "--start=%d" % int(resume),
+        "--force-media-title=%s" % name,
+        "--no-terminal",
+        *MPV_CACHE_FLAGS,
+        url,
+    ]
+
+
+def build_iina_args(path, sock, resume, name, url):
+    """Construct the IINA command line (mpv-prefixed IPC + resume + cache/hwdec)."""
+    return [
+        path,
+        "--mpv-input-ipc-server=%s" % sock,
+        "--mpv-start=%d" % int(resume),
+        "--mpv-force-media-title=%s" % name,
+        *IINA_CACHE_FLAGS,
+        url,
+    ]
+
 
 def detect_player(preference="auto"):
     """Return (kind, path) where kind in {"mpv","iina","vlc"} or (None, None)."""
@@ -93,26 +134,13 @@ class PlayerManager:
 
     def _launch_mpv(self, path, file_id, name, url, resume, duration, drive_id, parent_id):
         sock = "/tmp/drivecast-%s.sock" % uuid.uuid4().hex[:12]
-        args = [
-            path,
-            "--input-ipc-server=%s" % sock,
-            "--start=%d" % int(resume),
-            "--force-media-title=%s" % name,
-            "--no-terminal",
-            url,
-        ]
+        args = build_mpv_args(path, sock, resume, name, url)
         proc = subprocess.Popen(args)
         self._start_poller("mpv", proc, sock, file_id, name, duration, drive_id, parent_id)
 
     def _launch_iina(self, path, file_id, name, url, resume, duration, drive_id, parent_id):
         sock = "/tmp/drivecast-%s.sock" % uuid.uuid4().hex[:12]
-        args = [
-            path,
-            "--mpv-input-ipc-server=%s" % sock,
-            "--mpv-start=%d" % int(resume),
-            "--mpv-force-media-title=%s" % name,
-            url,
-        ]
+        args = build_iina_args(path, sock, resume, name, url)
         proc = subprocess.Popen(args)
         self._start_poller("iina", proc, sock, file_id, name, duration, drive_id, parent_id)
 

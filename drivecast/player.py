@@ -5,9 +5,12 @@ We never use `open -a`; we invoke the binary directly so we can pass flags and
 know when it exits.
 
 mpv / IINA expose a JSON IPC socket we poll for playback-time so we can save
-resume positions. VLC has no such tracking here — it resumes to the saved
-position via --start-time and we keep the prior position untouched.
+resume positions. VLC is tracked over its HTTP interface: we launch it with a
+loopback HTTP server on a private port + random password, then poll
+/requests/status.xml for the current time/length and save exactly like mpv. If
+the interface never comes up (older VLC, busy port) we degrade to launch-only.
 """
+import base64
 import json
 import logging
 import os
@@ -16,7 +19,9 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.request
 import uuid
+import xml.etree.ElementTree as ET
 
 log = logging.getLogger("drivecast.player")
 
@@ -25,6 +30,11 @@ VLC_BIN = "/Applications/VLC.app/Contents/MacOS/VLC"
 
 SOCKET_WAIT_SECONDS = 10.0
 POLL_INTERVAL = 3.0
+# VLC HTTP interface: a private loopback port (away from the app's 8737) and a
+# window to wait for the interface to come up before giving up on tracking.
+VLC_HTTP_PORT_START = 8738
+VLC_HTTP_TIMEOUT = 2.0        # per-request timeout (seconds)
+VLC_STARTUP_GRACE = 20.0      # keep polling this long for the interface to appear
 
 # Network buffering + hardware decode flags: the file is streamed over HTTP from
 # Drive, so a generous demuxer cache + readahead hides latency and hiccups, and
@@ -66,6 +76,59 @@ def build_iina_args(path, sock, resume, name, url):
         *IINA_CACHE_FLAGS,
         url,
     ]
+
+
+def build_vlc_args(path, resume, name, url, http_port, http_password):
+    """Construct the VLC command line with its HTTP interface + resume enabled.
+
+    The HTTP interface lets us poll playback position (see parse_vlc_status);
+    --start-time resumes and --play-and-exit closes VLC when the file ends.
+    """
+    return [
+        path,
+        "--extraintf", "http",
+        "--http-host", "127.0.0.1",
+        "--http-port", str(http_port),
+        "--http-password", http_password,
+        "--start-time=%d" % int(resume),
+        "--play-and-exit",
+        "--meta-title", name,
+        url,
+    ]
+
+
+def parse_vlc_status(xml_text):
+    """Parse VLC's /requests/status.xml into (time, length) floats.
+
+    Returns (None, None) on any parse failure or missing fields. Robust to the
+    many extra fields VLC includes — we only read <time> and <length>.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except (ET.ParseError, TypeError):
+        return (None, None)
+
+    def _num(text):
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return None
+
+    return (_num(root.findtext("time")), _num(root.findtext("length")))
+
+
+def _find_free_port(start=VLC_HTTP_PORT_START, tries=50):
+    """Return the first bindable loopback port at/after `start`, else `start`."""
+    for port in range(start, start + tries):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind(("127.0.0.1", port))
+            return port
+        except OSError:
+            continue
+        finally:
+            s.close()
+    return start
 
 
 def detect_player(preference="auto"):
@@ -126,7 +189,7 @@ class PlayerManager:
         elif kind == "iina":
             self._launch_iina(path, file_id, name, url, resume, duration, drive_id, parent_id)
         else:  # vlc
-            self._launch_vlc(path, file_id, name, url, resume, drive_id, parent_id)
+            self._launch_vlc(path, file_id, name, url, resume, duration, drive_id, parent_id)
 
         return {"player": kind, "resumed_from": resume}
 
@@ -144,18 +207,19 @@ class PlayerManager:
         proc = subprocess.Popen(args)
         self._start_poller("iina", proc, sock, file_id, name, duration, drive_id, parent_id)
 
-    def _launch_vlc(self, path, file_id, name, url, resume, drive_id, parent_id):
-        args = [
-            path,
-            "--start-time=%d" % int(resume),
-            "--play-and-exit",
-            "--meta-title", name,
-            url,
-        ]
-        subprocess.Popen(args)
-        # VLC: no IPC tracking. Just record the play timestamp, keep prior position.
-        self.history.update(file_id, name=name, drive_id=drive_id,
-                            parent_id=parent_id, force=True)
+    def _launch_vlc(self, path, file_id, name, url, resume, duration, drive_id, parent_id):
+        http_port = _find_free_port()
+        http_password = uuid.uuid4().hex
+        args = build_vlc_args(path, resume, name, url, http_port, http_password)
+        try:
+            proc = subprocess.Popen(args)
+        except OSError as exc:
+            log.debug("VLC launch failed: %r", exc)
+            self.history.update(file_id, name=name, drive_id=drive_id,
+                                parent_id=parent_id, force=True)
+            return
+        self._start_vlc_poller(proc, http_port, http_password, file_id, name,
+                               duration, drive_id, parent_id)
 
     # ---- IPC poller (mpv / IINA) ----
 
@@ -227,6 +291,82 @@ class PlayerManager:
                                     parent_id=parent_id, position=last_pos,
                                     duration=got_duration, force=True)
             self._cleanup_socket(sock)
+
+    # ---- HTTP poller (VLC) ----
+
+    def _start_vlc_poller(self, proc, http_port, http_password, file_id, name,
+                          duration, drive_id, parent_id):
+        stop = threading.Event()
+        session = {"stop": stop, "proc": proc, "file_id": file_id}
+        with self._session_lock:
+            self._session = session
+        t = threading.Thread(
+            target=self._vlc_poll_loop,
+            args=(proc, http_port, http_password, file_id, name, duration,
+                  drive_id, parent_id, stop),
+            daemon=True,
+        )
+        t.start()
+
+    def _vlc_poll_loop(self, proc, http_port, http_password, file_id, name,
+                       duration, drive_id, parent_id, stop):
+        # Seed an entry immediately (also the launch-only fallback if the HTTP
+        # interface never answers).
+        self.history.update(file_id, name=name, drive_id=drive_id,
+                            parent_id=parent_id, duration=duration, force=True)
+
+        status_url = "http://127.0.0.1:%d/requests/status.xml" % http_port
+        # VLC's HTTP interface uses HTTP Basic auth: empty username, our password.
+        token = base64.b64encode((":" + http_password).encode("utf-8")).decode("ascii")
+        headers = {"Authorization": "Basic " + token}
+
+        last_pos = 0.0
+        got_duration = duration
+        ever_connected = False
+        deadline = time.time() + VLC_STARTUP_GRACE
+        try:
+            while not stop.is_set():
+                if proc.poll() is not None:
+                    break  # VLC exited
+                pos, length = self._vlc_status(status_url, headers)
+                if pos is not None:
+                    ever_connected = True
+                    last_pos = pos
+                    if got_duration is None and length:
+                        got_duration = length
+                    self.history.update(file_id, name=name, drive_id=drive_id,
+                                        parent_id=parent_id, position=last_pos,
+                                        duration=got_duration)
+                elif not ever_connected and time.time() > deadline:
+                    # Interface never came up: leave launch-only and stop polling.
+                    log.debug("VLC HTTP interface unreachable for %s; launch-only", file_id)
+                    return
+                if stop.wait(POLL_INTERVAL):
+                    break
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("VLC poller error for %s: %r", file_id, exc)
+        finally:
+            if ever_connected:
+                final_dur = got_duration or 0.0
+                if final_dur and last_pos >= 0.9 * final_dur:
+                    self.history.update(file_id, name=name, drive_id=drive_id,
+                                        parent_id=parent_id, position=last_pos,
+                                        duration=final_dur, force=True)
+                    self.history.mark_watched(file_id, True)
+                else:
+                    self.history.update(file_id, name=name, drive_id=drive_id,
+                                        parent_id=parent_id, position=last_pos,
+                                        duration=got_duration, force=True)
+
+    def _vlc_status(self, status_url, headers):
+        """GET VLC's status.xml and return (time, length); (None, None) on error."""
+        try:
+            req = urllib.request.Request(status_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=VLC_HTTP_TIMEOUT) as resp:
+                body = resp.read()
+            return parse_vlc_status(body.decode("utf-8", "replace"))
+        except Exception:
+            return (None, None)
 
     def _wait_for_socket(self, sock, stop, timeout=SOCKET_WAIT_SECONDS):
         deadline = time.time() + timeout

@@ -197,9 +197,13 @@ def create_app(cfg=None):
     @app.get("/api/settings")
     async def api_get_settings():
         state = app.state.dc
+        from .player import detect_player
+        available = [k for k in ("mpv", "iina", "vlc") if detect_player(k)[0]]
         return {
             "selected_drives": state.cfg.get("selected_drives", []),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
+            "player": state.cfg.get("player", "auto"),
+            "available_players": available,
         }
 
     @app.post("/api/settings")
@@ -214,6 +218,10 @@ def create_app(cfg=None):
             state.cfg["selected_drives"] = new_drives
         if "auto_refresh_on_startup" in body:
             state.cfg["auto_refresh_on_startup"] = bool(body.get("auto_refresh_on_startup"))
+        if "player" in body:
+            choice = str(body.get("player") or "auto")
+            if choice in ("auto", "mpv", "iina", "vlc"):
+                state.cfg["player"] = choice
         config_mod.save_config(state.cfg)
         started = False
         if drives_changed:

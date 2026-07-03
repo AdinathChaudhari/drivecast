@@ -67,6 +67,16 @@
           <input type="checkbox" id="autoRefresh">
           <span>Auto-refresh library on launch</span>
         </label>
+        <div class="setting-row">
+          <label for="playerSelect"><strong>Video player</strong></label>
+          <select id="playerSelect">
+            <option value="auto">Auto (mpv → IINA → VLC)</option>
+            <option value="mpv">mpv</option>
+            <option value="iina">IINA</option>
+            <option value="vlc">VLC</option>
+          </select>
+          <p class="muted" id="playerHint">Which app opens when you press play. mpv tracks your position for Continue Watching; VLC plays everything but won't report where you stopped.</p>
+        </div>
         <div class="settings-actions">
           <button id="saveSettings" class="btn primary">Save</button>
           <span id="settingsMsg" class="muted"></span>

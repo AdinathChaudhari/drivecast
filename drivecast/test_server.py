@@ -102,7 +102,20 @@ def test_title_endpoint(client):
 def test_settings_get(client):
     r = client.get("/api/settings")
     assert r.status_code == 200
-    assert r.json() == {"selected_drives": ["drv1"], "auto_refresh_on_startup": False}
+    body = r.json()
+    assert body["selected_drives"] == ["drv1"]
+    assert body["auto_refresh_on_startup"] is False
+    assert "player" in body            # player preference exposed
+    assert "available_players" in body  # which players are installed
+
+
+def test_settings_post_player(client):
+    r = client.post("/api/settings", json={"player": "vlc"})
+    assert r.status_code == 200
+    assert client.get("/api/settings").json()["player"] == "vlc"
+    # invalid choice is ignored (stays a valid value)
+    client.post("/api/settings", json={"player": "bogus"})
+    assert client.get("/api/settings").json()["player"] == "vlc"
 
 
 def test_settings_post_toggle_auto_refresh(client):

@@ -317,6 +317,19 @@ async function openSettings() {
   catch (e) { list.innerHTML = `<div class="empty">Could not list drives: ${escapeHTML(e.message)}</div>`; return; }
   const selected = new Set(settings.selected_drives || []);
   $("autoRefresh").checked = !!settings.auto_refresh_on_startup;
+  const sel = $("playerSelect");
+  if (sel) {
+    sel.value = settings.player || "auto";
+    const avail = settings.available_players || [];
+    for (const opt of sel.options) {
+      if (opt.value !== "auto" && avail.length && !avail.includes(opt.value)) {
+        opt.textContent = opt.textContent.replace(/ \(not installed\)$/, "") + " (not installed)";
+      }
+    }
+    const hint = $("playerHint");
+    if (hint && avail.length) hint.textContent =
+      "Installed: " + avail.join(", ") + ". mpv tracks your position for Continue Watching; VLC plays everything but won't report where you stopped.";
+  }
   list.innerHTML = "";
   if (!drives.length) { list.innerHTML = `<div class="empty">No Shared Drives found.</div>`; return; }
   for (const d of drives) {
@@ -336,7 +349,7 @@ async function saveSettings() {
     const res = await api("/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ selected_drives: selected, auto_refresh_on_startup: auto }),
+      body: JSON.stringify({ selected_drives: selected, auto_refresh_on_startup: auto, player: ($("playerSelect") || {}).value || "auto" }),
     });
     $("settingsMsg").textContent = "Saved.";
     state.selectedDrives = res.selected_drives || [];

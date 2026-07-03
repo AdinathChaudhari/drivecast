@@ -37,10 +37,27 @@
       <section id="libSection">
         <div class="lib-head">
           <h2>Your Library</h2>
-          <div class="filters" id="filters">
-            <button class="chip active" data-filter="all">All</button>
-            <button class="chip" data-filter="movie">Movies</button>
-            <button class="chip" data-filter="show">TV Shows</button>
+          <div class="lib-controls">
+            <div class="filters" id="filters">
+              <button class="chip active" data-filter="all">All</button>
+              <button class="chip" data-filter="movie">Movies</button>
+              <button class="chip" data-filter="show">TV Shows</button>
+            </div>
+            <label class="ctrl">Sort
+              <select id="sortSel">
+                <option value="title">Title (A–Z)</option>
+                <option value="year">Year (newest)</option>
+                <option value="added">Recently added</option>
+                <option value="watched">Recently watched</option>
+              </select>
+            </label>
+            <label class="ctrl">Group
+              <select id="groupSel">
+                <option value="none">None</option>
+                <option value="type">By type</option>
+                <option value="drive">By drive</option>
+              </select>
+            </label>
           </div>
         </div>
         <div id="libGrid" class="grid"></div>
@@ -75,7 +92,7 @@
             <option value="iina">IINA</option>
             <option value="vlc">VLC</option>
           </select>
-          <p class="muted" id="playerHint">Which app opens when you press play. mpv tracks your position for Continue Watching; VLC plays everything but won't report where you stopped.</p>
+          <p class="muted" id="playerHint">Which app opens when you press play. mpv and IINA track your position for Continue Watching; VLC now does too, via its built-in HTTP interface. mpv stays the recommended default.</p>
         </div>
         <div class="settings-actions">
           <button id="saveSettings" class="btn primary">Save</button>

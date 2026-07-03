@@ -7,7 +7,10 @@ const state = {
   library: [],          // cached title records from /api/library
   byId: {},             // id -> record
   filter: "all",        // all | movie | show
+  sort: "title",        // title | year | added | watched
+  group: "none",        // none | type | drive
   query: "",            // client-side search over the library
+  watchedMap: {},       // file_id -> last_played epoch (for "Recently watched")
   selectedDrives: [],
   // browse (advanced) sub-state
   drives: [],
@@ -76,6 +79,11 @@ function posterMarkup(rec) {
   return { cls: " placeholder", html: ph };
 }
 
+// Quality pill (e.g. "4K", "1080p", "4K HDR") for a poster corner; "" if none.
+function qualityPill(rec) {
+  return rec.quality ? `<span class="pill">${escapeHTML(rec.quality)}</span>` : "";
+}
+
 // ---------- library tiles ----------
 function titleCard(rec) {
   const card = document.createElement("div");
@@ -87,7 +95,7 @@ function titleCard(rec) {
     ? `${(rec.seasons || []).length} season${(rec.seasons || []).length === 1 ? "" : "s"}`
     : (rec.year || "");
   card.innerHTML = `
-    <div class="poster${p.cls}">${badge}${p.html}</div>
+    <div class="poster${p.cls}">${badge}${qualityPill(rec)}${p.html}</div>
     <div class="label">${escapeHTML(rec.title)}</div>
     <div class="sub">${escapeHTML(sub)}</div>`;
   card.addEventListener("click", () => { location.hash = "#/title/" + encodeURIComponent(rec.id); });
@@ -135,12 +143,59 @@ function matchesFilter(rec) {
   return true;
 }
 
+// ---------- sorting / grouping (client-side over cached library) ----------
+function fileIdsOf(rec) {
+  if (rec.type === "show") {
+    const ids = [];
+    for (const s of rec.seasons || [])
+      for (const e of s.episodes || []) if (e.file_id) ids.push(e.file_id);
+    return ids;
+  }
+  return rec.file_id ? [rec.file_id] : [];
+}
+
+function lastPlayedOf(rec) {
+  let m = 0;
+  for (const id of fileIdsOf(rec)) { const t = state.watchedMap[id] || 0; if (t > m) m = t; }
+  return m;
+}
+
+function sortItems(items) {
+  const arr = items.slice();
+  const byTitle = (a, b) => (a.title || "").localeCompare(b.title || "");
+  if (state.sort === "year") arr.sort((a, b) => ((b.year || 0) - (a.year || 0)) || byTitle(a, b));
+  else if (state.sort === "added") arr.sort((a, b) => ((b.added_at || 0) - (a.added_at || 0)) || byTitle(a, b));
+  else if (state.sort === "watched") arr.sort((a, b) => (lastPlayedOf(b) - lastPlayedOf(a)) || byTitle(a, b));
+  else arr.sort(byTitle);
+  return arr;
+}
+
+function driveLabel(id) { return state.driveName[id] || id || "Unknown drive"; }
+
+function groupItems(items) {
+  if (state.group === "type") {
+    const movies = items.filter((r) => r.type === "movie");
+    const shows = items.filter((r) => r.type === "show");
+    const groups = [];
+    if (movies.length) groups.push({ key: "movie", title: "Movies", items: movies });
+    if (shows.length) groups.push({ key: "show", title: "TV Shows", items: shows });
+    return groups;
+  }
+  if (state.group === "drive") {
+    const map = {};
+    for (const r of items) (map[r.drive_id || ""] = map[r.drive_id || ""] || []).push(r);
+    return Object.keys(map)
+      .sort((a, b) => driveLabel(a).localeCompare(driveLabel(b)))
+      .map((k) => ({ key: k, title: driveLabel(k), items: map[k] }));
+  }
+  return [{ key: null, title: null, items }];
+}
+
 function renderLibrary() {
   const grid = $("libGrid");
   grid.innerHTML = "";
-  const items = state.library
-    .filter(matchesFilter)
-    .sort((a, b) => (a.title || "").localeCompare(b.title || ""));
+  grid.className = "grid";
+  let items = sortItems(state.library.filter(matchesFilter));
 
   // Empty states / call to action.
   if (!state.selectedDrives.length) {
@@ -163,7 +218,44 @@ function renderLibrary() {
     grid.innerHTML = `<div class="empty">No titles match “${escapeHTML(state.query)}”.</div>`;
     return;
   }
-  for (const rec of items) grid.appendChild(titleCard(rec));
+
+  const groups = groupItems(items);
+  if (groups.length === 1 && groups[0].key === null) {
+    for (const rec of groups[0].items) grid.appendChild(titleCard(rec));
+    return;
+  }
+  // Grouped: render a heading + its own grid per group.
+  grid.classList.remove("grid");
+  grid.classList.add("lib-grouped");
+  for (const g of groups) {
+    const sec = document.createElement("section");
+    sec.className = "lib-group";
+    const h = document.createElement("h3");
+    h.className = "group-head";
+    h.textContent = g.title;
+    sec.appendChild(h);
+    const gg = document.createElement("div");
+    gg.className = "grid";
+    for (const rec of g.items) gg.appendChild(titleCard(rec));
+    sec.appendChild(gg);
+    grid.appendChild(sec);
+  }
+}
+
+// Lazy loaders for data the sort/group needs.
+async function ensureWatchedMap() {
+  try {
+    const data = await api("/api/watched-map");
+    state.watchedMap = data.map || {};
+  } catch (_) { /* non-fatal */ }
+}
+
+async function ensureDriveNames() {
+  if (Object.keys(state.driveName).length) return;
+  try {
+    const data = await api("/api/drives");
+    for (const d of data.drives || []) state.driveName[d.id] = d.name;
+  } catch (_) { /* non-fatal — falls back to raw ids */ }
 }
 
 function showCta(html) {
@@ -241,7 +333,7 @@ function detailHeader(rec) {
   const p = posterMarkup(rec);
   return `
     <div class="detail-hero">
-      <div class="detail-poster poster${p.cls}">${p.html}</div>
+      <div class="detail-poster poster${p.cls}">${qualityPill(rec)}${p.html}</div>
       <div class="detail-meta">
         <h1>${escapeHTML(rec.title)}</h1>
         <div class="detail-sub">${rec.year || ""}${rec.type === "show"
@@ -328,7 +420,7 @@ async function openSettings() {
     }
     const hint = $("playerHint");
     if (hint && avail.length) hint.textContent =
-      "Installed: " + avail.join(", ") + ". mpv tracks your position for Continue Watching; VLC plays everything but won't report where you stopped.";
+      "Installed: " + avail.join(", ") + ". mpv and IINA track your position for Continue Watching; VLC now does too via its HTTP interface. mpv stays the recommended default.";
   }
   list.innerHTML = "";
   if (!drives.length) { list.innerHTML = `<div class="empty">No Shared Drives found.</div>`; return; }
@@ -409,8 +501,8 @@ async function launch(fileId, name, durMs, driveId, parentId, startOver) {
 
 function showVlcBanner() {
   const b = $("banner");
-  b.innerHTML = "Playing in VLC — resume tracking is unavailable. " +
-    "Install mpv for automatic resume: <code>brew install mpv</code>";
+  b.innerHTML = "Playing in VLC — resume &amp; Continue Watching are tracked via VLC's " +
+    "HTTP interface. If resume doesn't stick, update VLC or install mpv: <code>brew install mpv</code>";
   show(b, true);
 }
 
@@ -613,6 +705,20 @@ $("filters").addEventListener("click", (e) => {
   renderLibrary();
 });
 
+$("sortSel").addEventListener("change", async (e) => {
+  state.sort = e.target.value;
+  try { localStorage.setItem("dc.sort", state.sort); } catch (_) {}
+  if (state.sort === "watched") await ensureWatchedMap();
+  renderLibrary();
+});
+
+$("groupSel").addEventListener("change", async (e) => {
+  state.group = e.target.value;
+  try { localStorage.setItem("dc.group", state.group); } catch (_) {}
+  if (state.group === "drive") await ensureDriveNames();
+  renderLibrary();
+});
+
 $("search").addEventListener("input", (e) => {
   state.query = e.target.value.trim();
   if (currentRoute() === "library") renderLibrary();
@@ -622,7 +728,22 @@ $("search").addEventListener("input", (e) => {
 window.addEventListener("hashchange", router);
 
 // ---------- init ----------
+function restoreControls() {
+  try {
+    const s = localStorage.getItem("dc.sort");
+    const g = localStorage.getItem("dc.group");
+    if (s) state.sort = s;
+    if (g) state.group = g;
+  } catch (_) {}
+  const ss = $("sortSel"), gs = $("groupSel");
+  if (ss) ss.value = state.sort;
+  if (gs) gs.value = state.group;
+}
+
 (async function init() {
+  restoreControls();
   await loadLibrary();
+  await ensureWatchedMap();
+  if (state.group === "drive") await ensureDriveNames();
   router();
 })();

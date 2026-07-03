@@ -155,6 +155,16 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #d6d6dc; }
 }
 .badge.tv { background: rgba(122,162,255,0.85); color: #0b0b10; }
 
+/* quality pill (top-right corner of a poster) */
+.pill {
+  position: absolute; top: 8px; right: 8px; z-index: 1;
+  background: rgba(0,0,0,0.62); color: #f2f2f5;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.4px;
+  padding: 3px 7px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.14);
+  backdrop-filter: blur(4px);
+}
+
 .progress {
   position: absolute; left: 0; right: 0; bottom: 0;
   height: 4px; background: rgba(255,255,255,0.15);
@@ -231,7 +241,21 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #d6d6dc; }
 /* ---- library head + filters ---- */
 .lib-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
 .lib-head h2 { margin: 0; }
+.lib-controls { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.ctrl { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+.ctrl select {
+  padding: 6px 12px; border-radius: 999px; background: var(--panel-2);
+  color: var(--text); border: 1px solid rgba(255,255,255,0.08); font-size: 13px; outline: none;
+}
+.ctrl select:focus { border-color: var(--accent); }
 .filters { display: flex; gap: 8px; }
+
+/* ---- grouped library sections ---- */
+.lib-grouped { display: flex; flex-direction: column; gap: 28px; }
+.lib-group .group-head {
+  font-size: 14px; font-weight: 600; color: var(--muted); margin: 0 0 12px;
+  padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.06);
+}
 .chip {
   padding: 6px 14px; border-radius: 999px; cursor: pointer; font-size: 13px;
   background: var(--panel-2); color: var(--muted);

@@ -27,6 +27,9 @@ DATA_FILES = []
 OPTIONS = {
     # argv_emulation uses Carbon and can hang GUI apps; off for a menu-bar app.
     'argv_emulation': False,
+    # App icon. Regenerate with: ./venv/bin/python assets/make_icon.py then
+    # rebuild the .icns (see assets/). Comment out to fall back to a generic icon.
+    'iconfile': 'assets/drivecast.icns',
     'plist': {
         'CFBundleName': 'drivecast',
         'CFBundleDisplayName': 'drivecast',

@@ -12,6 +12,7 @@ const state = {
   query: "",            // client-side search over the library
   watchedMap: {},       // file_id -> last_played epoch (for "Recently watched")
   selectedDrives: [],
+  autoplayNext: true,   // autoplay next episode when one finishes
   // browse (advanced) sub-state
   drives: [],
   driveName: {},
@@ -364,6 +365,31 @@ function renderShowDetail(rec) {
       <select id="seasonSel"></select>
     </div>
     <div id="episodeList" class="episodes"></div>`;
+
+  // Shuffle: play every episode of the show in a random order (autoplay carries
+  // through the shuffled queue). Plus a small autoplay-status hint.
+  const actions = $("detailActions");
+  const shuffleBtn = document.createElement("button");
+  shuffleBtn.className = "btn";
+  shuffleBtn.innerHTML = "⤨ Shuffle";
+  shuffleBtn.addEventListener("click", () => {
+    const eps = shuffle(allEpisodes(rec));
+    if (!eps.length) { toast("No episodes to shuffle."); return; }
+    toast(`Shuffling ${eps.length} episode${eps.length === 1 ? "" : "s"}`);
+    const first = eps[0];
+    const queue = eps.slice(1).map(queueItem);
+    playFile(
+      { id: first.file_id, name: first.name, drive_id: rec.drive_id, parent_id: first.parent_id },
+      first.duration_ms || null, true, queue);
+  });
+  actions.appendChild(shuffleBtn);
+  if (state.autoplayNext) {
+    const hint = document.createElement("span");
+    hint.className = "autoplay-hint";
+    hint.textContent = "Autoplay on";
+    actions.appendChild(hint);
+  }
+
   const seasons = rec.seasons || [];
   const sel = $("seasonSel");
   seasons.forEach((s, i) => {
@@ -377,11 +403,35 @@ function renderShowDetail(rec) {
   renderEpisodes(rec, seasons[0]);
 }
 
+// Minimal queue item {file_id, name, duration_ms} for the autoplay queue.
+function queueItem(ep) {
+  return { file_id: ep.file_id, name: ep.name, duration_ms: ep.duration_ms || null };
+}
+
+// Every playable episode across all seasons, in order.
+function allEpisodes(rec) {
+  const eps = [];
+  for (const s of rec.seasons || [])
+    for (const e of s.episodes || []) if (e.file_id) eps.push(e);
+  return eps;
+}
+
+// Fisher–Yates shuffle (returns a new array).
+function shuffle(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
 function renderEpisodes(rec, season) {
   const list = $("episodeList");
   list.innerHTML = "";
   if (!season) return;
-  for (const ep of season.episodes) {
+  const eps = season.episodes;
+  eps.forEach((ep, idx) => {
     const row = document.createElement("div");
     row.className = "episode";
     const num = ep.episode != null ? `E${String(ep.episode).padStart(2, "0")}` : "";
@@ -390,11 +440,15 @@ function renderEpisodes(rec, season) {
       <span class="ep-title">${escapeHTML(ep.title || ep.name)}</span>
       <span class="ep-dur">${ep.duration_ms ? fmtTime(ep.duration_ms / 1000) : ""}</span>
       <span class="ep-play">▶</span>`;
-    row.addEventListener("click", () => playFile(
-      { id: ep.file_id, name: ep.name, drive_id: rec.drive_id, parent_id: ep.parent_id },
-      ep.duration_ms || null));
+    row.addEventListener("click", () => {
+      // Autoplay: queue the rest of this season after the clicked episode.
+      const queue = eps.slice(idx + 1).filter((e) => e.file_id).map(queueItem);
+      playFile(
+        { id: ep.file_id, name: ep.name, drive_id: rec.drive_id, parent_id: ep.parent_id },
+        ep.duration_ms || null, false, queue);
+    });
     list.appendChild(row);
-  }
+  });
 }
 
 // ---------- settings view ----------
@@ -409,6 +463,8 @@ async function openSettings() {
   catch (e) { list.innerHTML = `<div class="empty">Could not list drives: ${escapeHTML(e.message)}</div>`; return; }
   const selected = new Set(settings.selected_drives || []);
   $("autoRefresh").checked = !!settings.auto_refresh_on_startup;
+  state.autoplayNext = settings.autoplay_next !== false;
+  if ($("autoplayNext")) $("autoplayNext").checked = state.autoplayNext;
   const sel = $("playerSelect");
   if (sel) {
     sel.value = settings.player || "auto";
@@ -436,15 +492,17 @@ async function openSettings() {
 async function saveSettings() {
   const selected = [...$("driveList").querySelectorAll("input:checked")].map((c) => c.value);
   const auto = $("autoRefresh").checked;
+  const autoplay = $("autoplayNext") ? $("autoplayNext").checked : true;
   $("settingsMsg").textContent = "Saving…";
   try {
     const res = await api("/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ selected_drives: selected, auto_refresh_on_startup: auto, player: ($("playerSelect") || {}).value || "auto" }),
+      body: JSON.stringify({ selected_drives: selected, auto_refresh_on_startup: auto, autoplay_next: autoplay, player: ($("playerSelect") || {}).value || "auto" }),
     });
     $("settingsMsg").textContent = "Saved.";
     state.selectedDrives = res.selected_drives || [];
+    state.autoplayNext = res.autoplay_next !== false;
     if (res.refresh_started) { toast("Drives changed — refreshing library…"); startScanWatch(); }
   } catch (e) {
     $("settingsMsg").textContent = "Save failed: " + e.message;
@@ -454,12 +512,13 @@ async function saveSettings() {
 // ---------- play ----------
 let pendingPlay = null;
 
-async function playFile(f, durationMs, skipResumeCheck) {
+async function playFile(f, durationMs, skipResumeCheck, queue) {
   const fileId = f.id;
   const name = f.name;
   const durMs = durationMs || null;
   const driveId = f.drive_id || state.driveId;
   const parentId = f.parent_id || state.folderId;
+  const q = queue || [];
 
   let resumeAt = 0;
   if (!skipResumeCheck) {
@@ -470,16 +529,16 @@ async function playFile(f, durationMs, skipResumeCheck) {
     } catch (_) {}
   }
   if (resumeAt > 5 && !skipResumeCheck) {
-    pendingPlay = { fileId, name, durMs, driveId, parentId };
+    pendingPlay = { fileId, name, durMs, driveId, parentId, queue: q };
     $("modalBody").textContent =
       `You were at ${fmtTime(resumeAt)}. Resume or start from the beginning?`;
     show($("modal"), true);
     return;
   }
-  await launch(fileId, name, durMs, driveId, parentId, false);
+  await launch(fileId, name, durMs, driveId, parentId, false, q);
 }
 
-async function launch(fileId, name, durMs, driveId, parentId, startOver) {
+async function launch(fileId, name, durMs, driveId, parentId, startOver, queue) {
   try {
     const res = await api("/api/play", {
       method: "POST",
@@ -487,6 +546,7 @@ async function launch(fileId, name, durMs, driveId, parentId, startOver) {
       body: JSON.stringify({
         file_id: fileId, name, duration_ms: durMs,
         drive_id: driveId, parent_id: parentId, start_over: !!startOver,
+        queue: queue || [],
       }),
     });
     const from = res.resumed_from > 1 ? ` (resumed at ${fmtTime(res.resumed_from)})` : "";
@@ -508,11 +568,11 @@ function showVlcBanner() {
 
 $("btnResume").addEventListener("click", async () => {
   show($("modal"), false);
-  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, false);
+  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, false, pendingPlay.queue);
 });
 $("btnStartOver").addEventListener("click", async () => {
   show($("modal"), false);
-  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, true);
+  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, true, pendingPlay.queue);
 });
 $("btnCancel").addEventListener("click", () => { show($("modal"), false); pendingPlay = null; });
 
@@ -740,10 +800,18 @@ function restoreControls() {
   if (gs) gs.value = state.group;
 }
 
+async function loadPlaybackSettings() {
+  try {
+    const s = await api("/api/settings");
+    state.autoplayNext = s.autoplay_next !== false;
+  } catch (_) { /* non-fatal — defaults to on */ }
+}
+
 (async function init() {
   restoreControls();
   await loadLibrary();
   await ensureWatchedMap();
+  await loadPlaybackSettings();
   if (state.group === "drive") await ensureDriveNames();
   router();
 })();

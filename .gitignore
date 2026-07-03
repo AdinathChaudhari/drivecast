@@ -22,3 +22,7 @@ client_secret*.json
 *credentials*.json
 google_client*.json
 gdrive_client*.json
+
+# Personal working docs — kept local, never published
+CASE_STUDY.md
+DISCUSSION.md

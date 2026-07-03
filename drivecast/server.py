@@ -1,4 +1,5 @@
 """FastAPI application: API routes, streaming proxy, static UI."""
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -11,6 +12,7 @@ from . import config as config_mod
 from . import naming
 from .drive_api import DriveAPI, DriveAPIError
 from .history import History
+from .library import Library, Scanner
 from .player import PlayerError, PlayerManager, detect_player
 from .rclone_auth import RcloneError, TokenManager
 from .streaming import Streamer
@@ -31,9 +33,36 @@ class AppState:
         self.streamer = Streamer(self.tokens, self.api)
         self.history = History()
         self.tmdb = TMDB(cfg.get("tmdb_api_key"))
+        self.library = Library()
+        self.library.seed_api_cache(self.api)
+        self.scanner = Scanner(self.api, self.tmdb, self.library,
+                               throttle=cfg.get("scan_throttle", 0.15))
         port = cfg.get("port", 8737)
         self.player = PlayerManager(cfg, self.history, "http://127.0.0.1:%d" % port)
         self.setup_error = None  # populated by preflight if rclone is unusable
+        self._refresh_task = None
+
+    def start_refresh(self):
+        """Kick a background library scan of the selected drives, if idle.
+
+        Returns True if a scan was started, False if one is already running or
+        no drives are selected.
+        """
+        drives = self.cfg.get("selected_drives") or []
+        if not drives or self.scanner.status.get("running"):
+            return False
+        self._refresh_task = asyncio.create_task(self.scanner.scan(drives))
+        return True
+
+    def maybe_autorefresh(self):
+        """On startup: rescan if configured to, or if we have drives but no cache."""
+        if self.setup_error:
+            return
+        drives = self.cfg.get("selected_drives") or []
+        if not drives:
+            return
+        if self.cfg.get("auto_refresh_on_startup") or self.library.is_empty():
+            self.start_refresh()
 
     async def preflight(self):
         """Verify rclone can produce a token; record a friendly error if not."""
@@ -70,6 +99,7 @@ def create_app(cfg=None):
         state = AppState(cfg)
         app.state.dc = state
         await state.preflight()
+        state.maybe_autorefresh()
         yield
         await state.aclose()
 
@@ -124,6 +154,77 @@ def create_app(cfg=None):
         except RcloneError as e:
             return JSONResponse({"error": "setup", "message": str(e)}, status_code=503)
 
+    # ---- library ----
+
+    @app.get("/api/library")
+    async def api_library():
+        state = app.state.dc
+        return {
+            "titles": state.library.titles_list(),
+            "generated_at": state.library.generated_at(),
+            "scanning": bool(state.scanner.status.get("running")),
+            "selected_drives": state.cfg.get("selected_drives", []),
+        }
+
+    @app.get("/api/title/{title_id}")
+    async def api_title(title_id: str):
+        state = app.state.dc
+        rec = state.library.get(title_id)
+        if not rec:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        return rec
+
+    @app.post("/api/refresh")
+    async def api_refresh():
+        state = app.state.dc
+        if state.setup_error:
+            return JSONResponse({"error": "setup", "message": state.setup_error}, status_code=503)
+        if state.scanner.status.get("running"):
+            return {"started": False, "running": True}
+        if not (state.cfg.get("selected_drives") or []):
+            return JSONResponse(
+                {"error": "no_drives", "message": "No drives selected. Pick drives in Settings."},
+                status_code=400,
+            )
+        state.start_refresh()
+        return {"started": True, "running": True}
+
+    @app.get("/api/refresh/status")
+    async def api_refresh_status():
+        state = app.state.dc
+        return dict(state.scanner.status)
+
+    @app.get("/api/settings")
+    async def api_get_settings():
+        state = app.state.dc
+        return {
+            "selected_drives": state.cfg.get("selected_drives", []),
+            "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
+        }
+
+    @app.post("/api/settings")
+    async def api_post_settings(request: Request):
+        state = app.state.dc
+        body = await request.json()
+        drives_changed = False
+        if "selected_drives" in body:
+            new_drives = list(body.get("selected_drives") or [])
+            if new_drives != (state.cfg.get("selected_drives") or []):
+                drives_changed = True
+            state.cfg["selected_drives"] = new_drives
+        if "auto_refresh_on_startup" in body:
+            state.cfg["auto_refresh_on_startup"] = bool(body.get("auto_refresh_on_startup"))
+        config_mod.save_config(state.cfg)
+        started = False
+        if drives_changed:
+            started = state.start_refresh()
+        return {
+            "ok": True,
+            "selected_drives": state.cfg.get("selected_drives", []),
+            "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
+            "refresh_started": started,
+        }
+
     @app.api_route("/stream/{file_id}", methods=["GET", "HEAD"])
     async def stream(file_id: str, request: Request):
         state = app.state.dc
@@ -143,6 +244,12 @@ def create_app(cfg=None):
         if not file_id:
             return JSONResponse({"error": "bad_request", "message": "file_id required"}, status_code=400)
         duration_ms = body.get("duration_ms")
+        # Prefer the library cache for duration so playback launches without a
+        # blocking Drive metadata call.
+        if not duration_ms:
+            info = state.library.file_info(file_id)
+            if info:
+                duration_ms = info.get("duration_ms")
         drive_id = body.get("drive_id")
         parent_id = body.get("parent_id")
         if body.get("start_over"):

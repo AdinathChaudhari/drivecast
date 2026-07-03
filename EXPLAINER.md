@@ -174,17 +174,36 @@ the menu-bar **Drives to include** submenu). Only those drives appear; the rest
 are invisible. The choice lives in `config.json` as `selected_drives`.
 
 **The scan.** A scan (first run, on launch if you enabled auto-refresh, or when
-you hit **Refresh**) walks each selected drive's folder tree via `files.list` and
-classifies every top-level folder:
+you hit **Refresh**) walks each selected drive's folder tree via `files.list`,
+building a **nested tree** that preserves the folder hierarchy, and then
+classifies each folder **recursively**:
 
-- A folder is a **TV show** if it has season-named subfolders (`Season 1`, `S01`,
-  `Series 2`, …) **or** ≥2 episode-named videos (`S01E02`, `2x05`, `Episode 3`,
-  `E04`). Episodes are grouped into seasons (from the subfolder name, else the
-  `SxxExx` marker, else season 1) and sorted by episode number.
-- Otherwise it's a **movie**, whose main file is the largest video in the folder
-  (`sample`/`trailer`/`featurette`/`extra` files are ignored).
+- A folder is a **TV show** if it has a direct season-named subfolder (`Season 1`,
+  `S01`, `Series 2`, …) **or** ≥2 of its videos (directly, or in its immediate
+  season subfolders) carry episode markers (`S01E02`, `2x05`, `Episode 3`, `E04`).
+  A show becomes **one tile**: its descendant videos are grouped into seasons
+  (from the subfolder name, else the `SxxExx` marker, else season 1) and sorted by
+  episode number.
+- Otherwise the folder **expands into movies**, recursing down the tree so each
+  film is its own tile:
+  - A **leaf movie folder** with one main video becomes one movie titled from the
+    *folder* name; with several main videos, one movie per video, titled from each
+    *file* name.
+  - A **container** (a collection like `Phase 1`, `Hollywood`, `Blade Series`,
+    `The Godfather Series`, holding movie subfolders and/or loose movie files,
+    possibly nested) recurses into each subfolder and turns any stray loose video
+    into its own tile — so a `Phase 1` folder yields *Iron Man*, *The Incredible
+    Hulk*, *Thor*, … rather than one bogus `Phase 1` tile.
+  - **Bonus-material subfolders** (`Featurettes`, `Extras`, `Bonus`, `Behind the
+    Scenes`, `Deleted Scenes`, `Sample(s)`, `Subs`, `Subtitles`, `Trailers`) are
+    skipped, and a leading **enumeration prefix** (`01) `, `01.`, `1 - `) is
+    stripped from titles (without touching real leading numbers like *2 Fast 2
+    Furious* or *1917*).
 - Loose videos sitting at a drive's root are parsed by filename: `SxxExx` files
   group into a show; everything else is a standalone movie.
+
+Each movie record is keyed by its Drive **file id** (unique and stable), so the
+same film never collides with another tile.
 
 **Grouping seasons into one show.** Real drives store seasons in wildly different
 ways, so after the first pass drivecast merges them so each show is a single tile:
@@ -207,16 +226,18 @@ playback later needs no extra metadata call. From then on the home grid, detail
 pages, seasons and episodes all render from this file: **zero API calls**.
 
 **Refresh diffing.** A refresh rescans and diffs against the existing library:
-newly-found titles are added (and their posters fetched), titles whose files are
-gone are removed (and their now-orphaned posters deleted), and show episode lists
-are updated in place. A `/api/refresh/status` endpoint drives the progress bar.
+newly-found titles are added, titles whose files are gone are removed (and their
+now-orphaned posters deleted), and show episode lists are updated in place. A
+`/api/refresh/status` endpoint drives the progress bar.
 
-**Posters, pre-cached.** During the scan, each *new* title is resolved against
-**TMDB** (movie vs TV, by title+year, if you set an API key), its w342 poster is
-downloaded to `data/posters/`, and the local path is stored in the record — so
-tiles load instantly from disk with no per-card lookup. Negative results are
-cached too. No key or no match → a clean **gradient placeholder** with the title
-and year. TMDB is purely additive.
+**Posters, pre-cached.** During the scan, every title that doesn't already have a
+poster is resolved against **TMDB** (movie vs TV, by title+year, if you set an API
+key), its w342 poster is downloaded to the posters cache, and the local path is
+stored in the record — so tiles load instantly from disk with no per-card lookup.
+Because the scan backfills *every* poster-less title (not just newly-added ones),
+adding a TMDB key and hitting Refresh fills in your whole existing library.
+Negative results are cached too. No key or no match → a clean **gradient
+placeholder** with the title and year. TMDB is purely additive.
 
 **Search** is now instant and offline: the home search box filters the cached
 library client-side. The old server-side `corpora=allDrives` search (one query
@@ -250,18 +271,22 @@ your own generous quota. That's configured separately in `rclone config`.
 ```
 drivecast/
 ├── app.py                 # entry point: checks rclone works, starts the server, opens browser
-├── config.json            # your settings: remote, port, TMDB key, player, selected_drives, auto_refresh
 └── drivecast/
+    ├── config.py         # config/data/secrets under ~/Library/Application Support/drivecast (persists across rebuilds)
     ├── rclone_auth.py     # the keymaster: gets fresh tokens out of rclone (section 3)
     ├── drive_api.py       # talks to Google: list drives, browse, search — with rate-limit backoff
-    ├── library.py         # the cache: scan/classify drives → data/library.json, diff, posters (section 6)
+    ├── library.py         # the cache: recursive scan/classify drives → library.json, diff, posters (section 6)
     ├── streaming.py       # the stream proxy / relay (section 4) — the heart
     ├── player.py          # finds mpv/IINA/VLC, launches it (with cache/hwdec flags), mpv poller (section 5)
-    ├── history.py         # data/history.json: positions, watched flags, Continue Watching
-    ├── naming.py          # filename/folder → clean {title, year, season/episode}
-    ├── tmdb.py            # poster fetching + caching (pre-cached during the scan)
+    ├── history.py         # history.json: positions, watched flags, Continue Watching
+    ├── naming.py          # filename/folder → clean {title, year, season/episode}; enum-prefix + extras helpers
+    ├── tmdb.py            # poster fetching + caching (pre-cached/backfilled during the scan)
     ├── server.py          # the web API: /api/library, /api/title, /api/refresh, /api/settings, /stream, …
     └── static/            # the library UI: one HTML page, one JS file, one CSS file
+
+Config, data and secrets live outside the tree, in
+~/Library/Application Support/drivecast/ (config.json, data/, secrets/secrets.json),
+so they survive app rebuilds and the packaged .app can read them.
 ```
 
 Run it with `python app.py`, and your cloud media library is at
@@ -331,15 +356,20 @@ run one command and your entire cloud collection is right there to play.
 drivecast is deliberately built so the *code* is shareable but *your stuff* never
 is. The split is clean:
 
-- **Secrets** (your TMDB key, any OAuth client JSON) live in `secrets/`, which is
-  gitignored. The code loads the key from `secrets/secrets.json` or the
-  `DRIVECAST_TMDB_API_KEY` environment variable and — importantly — **never
-  writes it back into `config.json`**, so it can't accidentally end up in a file
-  that gets committed.
+- **Secrets, config and data live outside the repo**, in a stable per-user
+  directory: `~/Library/Application Support/drivecast/`. Your TMDB key sits in
+  `secrets/secrets.json` there (or the `DRIVECAST_TMDB_API_KEY` environment
+  variable), and it's — importantly — **never written back into `config.json`**,
+  so it can't accidentally end up in a committed file. Keeping everything in this
+  stable location also means it **persists across app rebuilds** (a py2app rebuild
+  no longer wipes your selected drives / library / history) and the packaged
+  `.app` can read your key. Only `config.example.json` — a blank template — ships
+  in the repo.
 - **Your Google login** isn't in drivecast at all. It lives in rclone's own
   config; drivecast only ever borrows a short-lived token at runtime.
 - **Your library** — the drive and file names, watch history, posters — all sit
-  in `data/`, also gitignored. None of it is in the repo.
+  in `~/Library/Application Support/drivecast/data/`, outside the repo. None of it
+  is in git.
 - The server only ever listens on `127.0.0.1`, so it's not reachable from the
   network even while running.
 - As a backstop, a **pre-commit hook** scans staged changes and refuses to commit

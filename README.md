@@ -8,12 +8,24 @@ bytes on demand. Nothing is ever written to disk.
 
 **Library model.** You pick which Shared Drives to include (Settings, or the
 menu-bar app). drivecast scans those drives **once** and caches a structured
-catalogue to `data/library.json`. From then on, normal browsing is instant and
+catalogue to `library.json`. From then on, normal browsing is instant and
 hits the Google API **zero times** — tiles, seasons, episodes and posters all
 come off disk. A **Refresh** (manual or on launch) rescans and diffs: new titles
 are added (and their posters fetched), deleted titles are removed (and their
 orphaned posters pruned), and show episode lists are updated. The raw
 folder-browser is still available behind a demoted **Browse files** link.
+
+**Collection folders.** The scan recurses *into* folder trees, so a collection
+folder (`Phase 1`, `Hollywood`, `Blade Series`, `The Godfather Series`, …) that
+holds many films — as loose files or one-movie subfolders, possibly nested —
+surfaces **each film as its own tile** rather than one wrong tile named after the
+folder. Bonus-material subfolders (`Featurettes`, `Extras`, `Behind the Scenes`,
+…) are ignored, and a leading enumeration prefix (`01) `, `01.`, `1 - `) is
+stripped from titles. TV shows (season subfolders or episode-marked files) are
+still detected and kept as a single show tile.
+
+> drivecast is strictly **read-only** on Google Drive — it never deletes, trashes
+> or moves anything. Only the local cache (posters/temp) is written.
 
 ## How streaming works (no downloads)
 
@@ -185,16 +197,18 @@ Once `app.py` is running and the library opens in your browser:
    app nudges you toward `brew install mpv`.
 7. **Refresh.** When you add or remove content on the drives, click **Refresh**
    (top bar) or the menu-bar **Refresh library** item. drivecast rescans, adds
-   new titles (fetching their posters), removes deleted ones, and updates show
-   episode lists — all without disturbing what you're watching.
+   new titles, removes deleted ones, updates show episode lists, and backfills
+   posters for any title still missing one (so enabling a TMDB key and hitting
+   Refresh gives every existing tile a poster) — all without disturbing what
+   you're watching.
 8. **Browse raw files (advanced).** The **Browse files** link still gives you the
    old live folder-by-folder browser over any drive, if you ever need it.
 
 ### Turning on posters (TMDB)
 
-Posters are **pre-cached during the scan**: for each new title drivecast resolves
-TMDB (movie vs TV, by title + year), downloads the w342 poster to
-`data/posters/`, and stores its path in the library record — so tiles load
+Posters are **pre-cached during the scan**: for each title without one drivecast
+resolves TMDB (movie vs TV, by title + year), downloads the w342 poster to the
+posters cache, and stores its path in the library record — so tiles load
 instantly from disk with no per-card lookup. Without a key (or when there's no
 match) a tile falls back to a clean gradient placeholder with the title and year.
 
@@ -204,14 +218,16 @@ To enable posters:
    no fee). For the sign-up form, "Application URL" can be
    `http://localhost:8737` and "Type of Use" is **Desktop Application**.
 2. Put the key in `secrets/secrets.json` (see [Secrets & security](#secrets--security)).
-3. Restart `app.py` and **Refresh** the library so new titles get posters.
+3. Restart `app.py` and **Refresh** the library. The scan backfills posters for
+   **every** title still missing one, so a first Refresh after adding the key
+   fills in your whole existing library, not just newly-added titles.
 
 ## Secrets & security
 
 drivecast is designed so **nothing personal ever reaches the repo**. All private
 material lives in gitignored locations and is loaded at runtime:
 
-- **API keys** → `secrets/secrets.json` (copy `secrets/secrets.example.json`):
+- **API keys** → `secrets/secrets.json`:
 
   ```json
   { "tmdb_api_key": "your-tmdb-key" }
@@ -220,10 +236,14 @@ material lives in gitignored locations and is loaded at runtime:
   You can also pass it via the `DRIVECAST_TMDB_API_KEY` environment variable.
   Keys are **never** written back into `config.json`, so they can't leak there.
 - **Google Drive credentials** never touch drivecast — they live only in your
-  rclone config. Drop your own OAuth client JSON in `secrets/` if you keep one.
-- **`config.json`, `data/`, `secrets/`** are all gitignored. `data/` holds your
-  library catalogue, watch history and posters (your drive/file names) and stays
-  entirely local.
+  rclone config.
+- **Config, data and secrets live in a stable per-user directory**,
+  `~/Library/Application Support/drivecast/` (`config.json`, `data/`,
+  `secrets/secrets.json`) — *not* inside the repo or the packaged `.app`. This
+  means rebuilding/reinstalling the app never wipes your selected drives, library
+  or history, and the bundled app can read your TMDB key. It all stays local and
+  never reaches git. (`config.example.json` in the repo is only the first-run
+  template.)
 - The web server binds to **`127.0.0.1` only** — never exposed on your network.
 - A **pre-commit hook** (`scripts/install-hooks.sh`) refuses to commit secret
   files or key-shaped strings as a backstop. Install it after cloning:
@@ -237,8 +257,9 @@ neither is stored anywhere git can see.
 
 ## Configuration (`config.json`)
 
-Auto-created from `config.example.json` on first run. Holds **non-secret**
-settings only — secrets go in `secrets/` (above).
+Lives at `~/Library/Application Support/drivecast/config.json`, auto-created from
+the repo's `config.example.json` on first run. Holds **non-secret** settings
+only — secrets go in `secrets/` (above).
 
 | key            | default   | meaning                                             |
 |----------------|-----------|-----------------------------------------------------|
@@ -254,13 +275,16 @@ settings only — secrets go in `secrets/` (above).
 **Settings** view or the menu-bar app rather than by hand. (`tmdb_api_key` is a
 secret — set it in `secrets/secrets.json`, not here.)
 
-## Data (runtime, gitignored)
+## Data (runtime, local)
 
-- `data/library.json` — the cached catalogue (movie/show records, seasons,
+All under `~/Library/Application Support/drivecast/data/` (persists across app
+rebuilds):
+
+- `library.json` — the cached catalogue (movie/show records, seasons,
   episodes, poster paths); rebuilt by a scan/refresh
-- `data/history.json` — resume positions & watched state, keyed by Drive file id
-- `data/tmdb_cache.json` — cached TMDB lookups (including negative results)
-- `data/posters/` — downloaded w342 posters
+- `history.json` — resume positions & watched state, keyed by Drive file id
+- `tmdb_cache.json` — cached TMDB lookups (including negative results)
+- `posters/` — downloaded w342 posters
 
 ## Notes
 

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>drivecast</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand" id="homeBtn">
+      <span class="logo">▶</span><span class="brandname">drivecast</span>
+    </div>
+    <div class="searchwrap">
+      <input id="search" type="search" placeholder="Search all drives…" autocomplete="off">
+    </div>
+  </header>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <main>
+    <section id="continueSection" class="shelf hidden">
+      <h2>Continue Watching</h2>
+      <div id="continueRow" class="row"></div>
+    </section>
+
+    <section id="drivesSection" class="shelf">
+      <h2>Shared Drives</h2>
+      <div id="drivesRow" class="row"></div>
+    </section>
+
+    <nav id="breadcrumb" class="breadcrumb hidden"></nav>
+
+    <section id="gridSection" class="hidden">
+      <h2 id="gridTitle"></h2>
+      <div id="grid" class="grid"></div>
+      <div class="loadmore-wrap">
+        <button id="loadMore" class="loadmore hidden">Load more</button>
+      </div>
+    </section>
+
+    <div id="empty" class="empty hidden"></div>
+  </main>
+
+  <div id="toasts" class="toasts"></div>
+
+  <!-- Resume/start-over dialog -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="modalTitle">Resume playback?</h3>
+      <p id="modalBody"></p>
+      <div class="modal-actions">
+        <button id="btnResume" class="btn primary">Resume</button>
+        <button id="btnStartOver" class="btn">Start over</button>
+        <button id="btnCancel" class="btn ghost">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

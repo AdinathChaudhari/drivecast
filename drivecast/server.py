@@ -202,6 +202,7 @@ def create_app(cfg=None):
         return {
             "selected_drives": state.cfg.get("selected_drives", []),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
+            "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "player": state.cfg.get("player", "auto"),
             "available_players": available,
         }
@@ -218,6 +219,8 @@ def create_app(cfg=None):
             state.cfg["selected_drives"] = new_drives
         if "auto_refresh_on_startup" in body:
             state.cfg["auto_refresh_on_startup"] = bool(body.get("auto_refresh_on_startup"))
+        if "autoplay_next" in body:
+            state.cfg["autoplay_next"] = bool(body.get("autoplay_next"))
         if "player" in body:
             choice = str(body.get("player") or "auto")
             if choice in ("auto", "mpv", "iina", "vlc"):
@@ -230,6 +233,7 @@ def create_app(cfg=None):
             "ok": True,
             "selected_drives": state.cfg.get("selected_drives", []),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
+            "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "refresh_started": started,
         }
 
@@ -260,6 +264,27 @@ def create_app(cfg=None):
                 duration_ms = info.get("duration_ms")
         drive_id = body.get("drive_id")
         parent_id = body.get("parent_id")
+        # Optional autoplay queue: episodes to play AFTER this one. Whitelist the
+        # fields and drop anything malformed (non-list / items without a file_id).
+        queue = []
+        raw_queue = body.get("queue")
+        if isinstance(raw_queue, list):
+            for item in raw_queue:
+                if not isinstance(item, dict):
+                    continue
+                fid = item.get("file_id")
+                if not fid:
+                    continue
+                qdur = item.get("duration_ms")
+                if not qdur:
+                    info = state.library.file_info(fid)
+                    if info:
+                        qdur = info.get("duration_ms")
+                queue.append({
+                    "file_id": fid,
+                    "name": item.get("name") or fid,
+                    "duration_ms": qdur,
+                })
         if body.get("start_over"):
             # Clear the saved resume position so the player starts at 0.
             state.history.update(file_id, name=name, drive_id=drive_id,
@@ -267,7 +292,7 @@ def create_app(cfg=None):
         try:
             result = state.player.play(
                 file_id, name, duration_ms=duration_ms,
-                drive_id=drive_id, parent_id=parent_id,
+                drive_id=drive_id, parent_id=parent_id, queue=queue,
             )
             return result
         except PlayerError as e:

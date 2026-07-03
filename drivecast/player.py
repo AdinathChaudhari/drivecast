@@ -53,6 +53,33 @@ MPV_CACHE_FLAGS = [
 IINA_CACHE_FLAGS = ["--mpv-" + flag[2:] for flag in MPV_CACHE_FLAGS]
 
 
+# How close to the end counts as "finished" (so we advance to the next episode
+# instead of treating it as a mid-episode quit): the last 10% OR the last ~90s.
+FINISH_FRACTION = 0.9
+FINISH_TAIL_SECONDS = 90.0
+
+
+def should_advance(position, duration):
+    """Return True if playback reached the end (finished), False if quit early.
+
+    Finished = duration is known (> 0) AND the last position is within the last
+    10% of the file OR within ~90s of the end. Unknown / zero duration returns
+    False: we can't tell, so we treat it as a mid-episode quit and do NOT
+    auto-advance. This is a pure function so the finished-vs-quit rule is
+    unit-testable without launching a player.
+    """
+    try:
+        position = float(position)
+        duration = float(duration)
+    except (TypeError, ValueError):
+        return False
+    if duration <= 0:
+        return False
+    if position >= FINISH_FRACTION * duration:
+        return True
+    return (duration - position) <= FINISH_TAIL_SECONDS
+
+
 def build_mpv_args(path, sock, resume, name, url):
     """Construct the mpv command line (IPC + resume + title + cache/hwdec)."""
     return [
@@ -166,8 +193,15 @@ class PlayerManager:
     def stream_url(self, file_id):
         return "%s/stream/%s" % (self.base_url, file_id)
 
-    def play(self, file_id, name, duration_ms=None, drive_id=None, parent_id=None):
+    def play(self, file_id, name, duration_ms=None, drive_id=None, parent_id=None,
+             queue=None):
         """Launch the configured player at the resume position.
+
+        `queue` is an optional ordered list of upcoming items
+        [{file_id, name, duration_ms}] to play AFTER this one (autoplay). When
+        this file finishes, the next queue item launches automatically, chaining
+        through the whole queue. If `autoplay_next` config is off the queue is
+        ignored and only this item plays.
 
         Returns {"player": kind, "resumed_from": seconds}.
         """
@@ -177,37 +211,51 @@ class PlayerManager:
                 "No supported player found. Install mpv for best results: brew install mpv"
             )
 
-        resume = self.history.resume_position(file_id)
-        url = self.stream_url(file_id)
-        duration = (float(duration_ms) / 1000.0) if duration_ms else None
+        # Autoplay disabled -> ignore the queue entirely (play only this item).
+        if not self.cfg.get("autoplay_next", True):
+            queue = None
 
         # Stop any prior tracked poller before starting a new session.
         self._stop_current_session()
 
-        if kind == "mpv":
-            self._launch_mpv(path, file_id, name, url, resume, duration, drive_id, parent_id)
-        elif kind == "iina":
-            self._launch_iina(path, file_id, name, url, resume, duration, drive_id, parent_id)
-        else:  # vlc
-            self._launch_vlc(path, file_id, name, url, resume, duration, drive_id, parent_id)
-
+        resume = self._launch(kind, path, file_id, name, duration_ms,
+                              drive_id, parent_id, list(queue or []))
         return {"player": kind, "resumed_from": resume}
 
     # ---- launchers ----
 
-    def _launch_mpv(self, path, file_id, name, url, resume, duration, drive_id, parent_id):
+    def _launch(self, kind, path, file_id, name, duration_ms, drive_id, parent_id, queue):
+        """Resolve resume/url/duration and dispatch to the per-player launcher.
+
+        Shared by play() and the autoplay-advance path so both start a session
+        identically. Returns the resume position (seconds).
+        """
+        resume = self.history.resume_position(file_id)
+        url = self.stream_url(file_id)
+        duration = (float(duration_ms) / 1000.0) if duration_ms else None
+        if kind == "mpv":
+            self._launch_mpv(path, file_id, name, url, resume, duration, drive_id, parent_id, queue)
+        elif kind == "iina":
+            self._launch_iina(path, file_id, name, url, resume, duration, drive_id, parent_id, queue)
+        else:  # vlc
+            self._launch_vlc(path, file_id, name, url, resume, duration, drive_id, parent_id, queue)
+        return resume
+
+    def _launch_mpv(self, path, file_id, name, url, resume, duration, drive_id, parent_id, queue):
         sock = "/tmp/drivecast-%s.sock" % uuid.uuid4().hex[:12]
         args = build_mpv_args(path, sock, resume, name, url)
         proc = subprocess.Popen(args)
-        self._start_poller("mpv", proc, sock, file_id, name, duration, drive_id, parent_id)
+        self._start_poller("mpv", path, proc, sock, file_id, name, duration,
+                           drive_id, parent_id, queue)
 
-    def _launch_iina(self, path, file_id, name, url, resume, duration, drive_id, parent_id):
+    def _launch_iina(self, path, file_id, name, url, resume, duration, drive_id, parent_id, queue):
         sock = "/tmp/drivecast-%s.sock" % uuid.uuid4().hex[:12]
         args = build_iina_args(path, sock, resume, name, url)
         proc = subprocess.Popen(args)
-        self._start_poller("iina", proc, sock, file_id, name, duration, drive_id, parent_id)
+        self._start_poller("iina", path, proc, sock, file_id, name, duration,
+                           drive_id, parent_id, queue)
 
-    def _launch_vlc(self, path, file_id, name, url, resume, duration, drive_id, parent_id):
+    def _launch_vlc(self, path, file_id, name, url, resume, duration, drive_id, parent_id, queue):
         http_port = _find_free_port()
         http_password = uuid.uuid4().hex
         args = build_vlc_args(path, resume, name, url, http_port, http_password)
@@ -218,8 +266,8 @@ class PlayerManager:
             self.history.update(file_id, name=name, drive_id=drive_id,
                                 parent_id=parent_id, force=True)
             return
-        self._start_vlc_poller(proc, http_port, http_password, file_id, name,
-                               duration, drive_id, parent_id)
+        self._start_vlc_poller(path, proc, http_port, http_password, file_id, name,
+                               duration, drive_id, parent_id, queue)
 
     # ---- IPC poller (mpv / IINA) ----
 
@@ -230,19 +278,44 @@ class PlayerManager:
         if sess:
             sess["stop"].set()
 
-    def _start_poller(self, kind, proc, sock, file_id, name, duration, drive_id, parent_id):
+    def _advance(self, kind, path, queue, drive_id, parent_id, stop):
+        """Launch the next queued item after the current one finished.
+
+        Called from a poller's finally block ONLY when should_advance said the
+        file finished. Skips if a newer session superseded this one (stop set),
+        if autoplay is off, or if the queue is empty. Chains the remainder of the
+        queue onto the next item so playback carries through the whole list.
+        """
+        if stop.is_set():
+            return  # a newer play() replaced this session; don't chain.
+        if not self.cfg.get("autoplay_next", True):
+            return
+        if not queue:
+            return
+        nxt, rest = queue[0], queue[1:]
+        try:
+            self._launch(kind, path, nxt.get("file_id"),
+                         nxt.get("name") or nxt.get("file_id"),
+                         nxt.get("duration_ms"), drive_id, parent_id, rest)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.debug("autoplay advance failed: %r", exc)
+
+    def _start_poller(self, kind, path, proc, sock, file_id, name, duration,
+                      drive_id, parent_id, queue):
         stop = threading.Event()
         session = {"stop": stop, "sock": sock, "proc": proc, "file_id": file_id}
         with self._session_lock:
             self._session = session
         t = threading.Thread(
             target=self._poll_loop,
-            args=(kind, proc, sock, file_id, name, duration, drive_id, parent_id, stop),
+            args=(kind, path, proc, sock, file_id, name, duration, drive_id,
+                  parent_id, queue, stop),
             daemon=True,
         )
         t.start()
 
-    def _poll_loop(self, kind, proc, sock, file_id, name, duration, drive_id, parent_id, stop):
+    def _poll_loop(self, kind, path, proc, sock, file_id, name, duration,
+                   drive_id, parent_id, queue, stop):
         # Seed an entry so it appears immediately / carries metadata.
         self.history.update(file_id, name=name, drive_id=drive_id,
                             parent_id=parent_id, duration=duration, force=True)
@@ -279,9 +352,10 @@ class PlayerManager:
                 conn.close()
             except Exception:
                 pass
-            # Final save: mark watched if we reached the end.
+            # Final save: mark watched + advance if we reached the end.
             final_dur = got_duration or 0.0
-            if final_dur and last_pos >= 0.9 * final_dur:
+            finished = should_advance(last_pos, final_dur)
+            if finished:
                 self.history.update(file_id, name=name, drive_id=drive_id,
                                     parent_id=parent_id, position=last_pos,
                                     duration=final_dur, force=True)
@@ -291,25 +365,27 @@ class PlayerManager:
                                     parent_id=parent_id, position=last_pos,
                                     duration=got_duration, force=True)
             self._cleanup_socket(sock)
+            if finished:
+                self._advance(kind, path, queue, drive_id, parent_id, stop)
 
     # ---- HTTP poller (VLC) ----
 
-    def _start_vlc_poller(self, proc, http_port, http_password, file_id, name,
-                          duration, drive_id, parent_id):
+    def _start_vlc_poller(self, path, proc, http_port, http_password, file_id, name,
+                          duration, drive_id, parent_id, queue):
         stop = threading.Event()
         session = {"stop": stop, "proc": proc, "file_id": file_id}
         with self._session_lock:
             self._session = session
         t = threading.Thread(
             target=self._vlc_poll_loop,
-            args=(proc, http_port, http_password, file_id, name, duration,
-                  drive_id, parent_id, stop),
+            args=(path, proc, http_port, http_password, file_id, name, duration,
+                  drive_id, parent_id, queue, stop),
             daemon=True,
         )
         t.start()
 
-    def _vlc_poll_loop(self, proc, http_port, http_password, file_id, name,
-                       duration, drive_id, parent_id, stop):
+    def _vlc_poll_loop(self, path, proc, http_port, http_password, file_id, name,
+                       duration, drive_id, parent_id, queue, stop):
         # Seed an entry immediately (also the launch-only fallback if the HTTP
         # interface never answers).
         self.history.update(file_id, name=name, drive_id=drive_id,
@@ -346,9 +422,12 @@ class PlayerManager:
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("VLC poller error for %s: %r", file_id, exc)
         finally:
+            # Only VLC instances whose HTTP interface answered give us a position
+            # to judge finished-vs-quit; launch-only VLC can't autoplay.
             if ever_connected:
                 final_dur = got_duration or 0.0
-                if final_dur and last_pos >= 0.9 * final_dur:
+                finished = should_advance(last_pos, final_dur)
+                if finished:
                     self.history.update(file_id, name=name, drive_id=drive_id,
                                         parent_id=parent_id, position=last_pos,
                                         duration=final_dur, force=True)
@@ -357,6 +436,8 @@ class PlayerManager:
                     self.history.update(file_id, name=name, drive_id=drive_id,
                                         parent_id=parent_id, position=last_pos,
                                         duration=got_duration, force=True)
+                if finished:
+                    self._advance("vlc", path, queue, drive_id, parent_id, stop)
 
     def _vlc_status(self, status_url, headers):
         """GET VLC's status.xml and return (time, length); (None, None) on error."""

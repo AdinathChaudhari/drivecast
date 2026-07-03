@@ -39,6 +39,7 @@ DEFAULTS = {
     "selected_drives": [],            # Shared Drive ids to include (empty = none yet)
     "auto_refresh_on_startup": False,  # rescan the library each launch
     "scan_throttle": 0.15,            # seconds to pause between scan API calls
+    "autoplay_next": True,            # auto-play the next episode when one finishes
 }
 
 # Keys we persist back to config.json. Secret keys are deliberately excluded so

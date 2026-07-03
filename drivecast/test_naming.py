@@ -103,3 +103,36 @@ def test_episode_title():
 
 def test_clean_title():
     assert naming.clean_title("Your Name (2016) [BluRay] [1080p]") == ("Your Name", 2016)
+
+
+def test_pure_season():
+    from drivecast import naming
+    assert naming.pure_season("Season 1") == 1
+    assert naming.pure_season("Season 03") == 3
+    assert naming.pure_season("S02") == 2
+    assert naming.pure_season("Series 4") == 4
+    assert naming.pure_season("Specials") == 0
+    assert naming.pure_season("Blackadder Season 1") is None
+    assert naming.pure_season("The Office") is None
+
+
+def test_split_season_suffix():
+    from drivecast import naming
+    assert naming.split_season_suffix("Blackadder Season 1 S01") == ("Blackadder", 1)
+    assert naming.split_season_suffix("Blackadder Season 2") == ("Blackadder", 2)
+    assert naming.split_season_suffix("Foo S02") == ("Foo", 2)
+    assert naming.split_season_suffix("Blackadder Specials") == ("Blackadder", 0)
+    # Range-named whole-series folder is NOT a single season.
+    assert naming.split_season_suffix("The Office Season 1-9 S01-s09") == (None, None)
+    # A bare season has no show prefix.
+    assert naming.split_season_suffix("Season 1") == (None, None)
+
+
+def test_season_parsers_ignore_quality_noise():
+    from drivecast import naming
+    # Real-world folder names carry bracketed quality junk.
+    assert naming.pure_season("Season 1 (480p DVD)") == 1
+    assert naming.split_season_suffix(
+        "Blackadder (1983) Season 1 S01 (576p DVD x265 HEVC 10bit AAC 2.0 Panda)"
+    ) == ("Blackadder", 1)
+    assert naming.split_season_suffix("Blackadder (1983) Specials") == ("Blackadder", 0)

@@ -282,3 +282,70 @@ def test_scan_survives_folder_rate_limit(tmp_path):
     titles = [t["title"] for t in lib.titles_list()]
     assert "Arrival" in titles
     assert status["error"] is not None  # recorded the skipped folder
+
+
+# ------------------------------------------------- season grouping (v2) --------
+
+def _showrec(fid, drive, folder_name, season, n_eps, year=None):
+    """A classified show record for one season folder (with _folder_name)."""
+    eps = [{"title": "Episode %d" % i, "episode": i, "file_id": "%se%d" % (fid, i),
+            "name": "ep%d.mkv" % i, "duration_ms": None, "size": 1, "parent_id": fid}
+           for i in range(1, n_eps + 1)]
+    return {"id": fid, "type": "show", "title": folder_name, "year": year,
+            "drive_id": drive, "folder_id": fid, "poster": None, "tmdb_id": None,
+            "overview": None, "_folder_name": folder_name,
+            "seasons": [{"season": season, "episodes": eps}]}
+
+
+def test_group_prefixed_season_folders():
+    # "Blackadder Season 1 S01" siblings -> one "Blackadder" show.
+    recs = [_showrec("b1", "dBL", "Blackadder Season 1 S01", 1, 6),
+            _showrec("b2", "dBL", "Blackadder Season 2 S02", 2, 6),
+            _showrec("b3", "dBL", "Blackadder Specials", 0, 2)]
+    out = library.group_seasons(recs, {"dBL": "TV | Blackadder"})
+    assert len(out) == 1
+    show = out[0]
+    assert show["type"] == "show" and show["title"] == "Blackadder"
+    assert sorted(s["season"] for s in show["seasons"]) == [0, 1, 2]
+    assert show["id"].startswith("grp:")
+
+
+def test_group_bare_season_folders_uses_drive_name():
+    recs = [_showrec("f1", "dFR", "Season 1", 1, 24),
+            _showrec("f2", "dFR", "Season 2", 2, 24)]
+    out = library.group_seasons(recs, {"dFR": "Fraiser"})
+    assert len(out) == 1 and out[0]["title"] == "Fraiser"
+    assert sorted(s["season"] for s in out[0]["seasons"]) == [1, 2]
+
+
+def test_group_merges_show_split_across_drives():
+    # Malcolm in the Middle split into Part 1 / Part 2 drives, bare seasons.
+    recs = [_showrec("a", "dM1", "Season 1", 1, 16),
+            _showrec("b", "dM2", "Season 5", 5, 22)]
+    names = {"dM1": "TV | Malcom in the Middle (Part 1)",
+             "dM2": "TV | Malcom in the Middle (Part 2)"}
+    out = library.group_seasons(recs, names)
+    assert len(out) == 1
+    assert out[0]["title"] == "Malcom in the Middle"
+    assert sorted(s["season"] for s in out[0]["seasons"]) == [1, 5]
+
+
+def test_group_leaves_range_named_wrapper_untouched():
+    # "The Office Season 1-9 S01-s09" is a whole-series wrapper, not one season.
+    office = {"id": "off", "type": "show", "title": "The Office", "year": 2005,
+              "drive_id": "dTV", "folder_id": "off", "poster": None, "tmdb_id": None,
+              "overview": None, "_folder_name": "The Office Season 1-9 S01-s09",
+              "seasons": [{"season": n, "episodes": []} for n in range(1, 10)]}
+    out = library.group_seasons([office], {"dTV": "TV Shows"})
+    assert len(out) == 1 and out[0]["id"] == "off"
+    assert "_folder_name" not in out[0]  # transient key stripped
+
+
+def test_group_passthrough_strips_transient_keys():
+    movie = {"id": "mv", "type": "movie", "title": "Arrival", "year": 2016,
+             "drive_id": "d", "folder_id": "mv", "file_id": "mv", "size": 10,
+             "duration_ms": None, "poster": None, "tmdb_id": None, "overview": None,
+             "_folder_name": "Arrival (2016)", "_video_name": "Arrival.2016.mkv"}
+    out = library.group_seasons([movie], {"d": "Movies"})
+    assert len(out) == 1 and out[0]["id"] == "mv" and out[0]["type"] == "movie"
+    assert "_folder_name" not in out[0] and "_video_name" not in out[0]

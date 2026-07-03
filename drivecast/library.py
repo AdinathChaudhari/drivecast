@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -158,6 +159,9 @@ def classify_title(node):
         "poster": None,
         "tmdb_id": None,
         "overview": None,
+        # Raw folder name kept transiently so the season-grouping pass can detect
+        # "<Show> Season N" / bare "Season N" siblings. Stripped before persisting.
+        "_folder_name": node["name"],
     }
 
     if has_season_folder or episode_videos >= 2:
@@ -170,6 +174,7 @@ def classify_title(node):
     base["file_id"] = main["id"]
     base["size"] = main["size"]
     base["duration_ms"] = main["duration_ms"]
+    base["_video_name"] = main["name"]
     return base
 
 
@@ -226,6 +231,130 @@ def classify_loose(drive_id, loose_files):
             "size": v["size"],
             "duration_ms": v["duration_ms"],
         })
+    return records
+
+
+# ------------------------------------------------------------- season grouping --
+
+# Drive-name noise to strip when a whole drive is one show (e.g. "TV | Blackadder",
+# "Movie // MCU", "Malcolm in the Middle (Part 1)").
+_DRIVE_PREFIX_RE = re.compile(r"^\s*(?:tv|movie|movies|show|shows)\s*[|/:\-]+\s*", re.IGNORECASE)
+_PART_SUFFIX_RE = re.compile(r"\s*[\(\[]?\s*part\s*\d+\s*[\)\]]?\s*$", re.IGNORECASE)
+
+
+def _clean_show_name(name):
+    """Human display name for a show derived from a drive/prefix name."""
+    n = _DRIVE_PREFIX_RE.sub("", name or "")
+    n = _PART_SUFFIX_RE.sub("", n)
+    return n.strip(" -_|/").strip() or (name or "").strip()
+
+
+def _norm_key(name):
+    """Normalised grouping key: lowercased, de-noised, alphanumerics only."""
+    n = _clean_show_name(name).lower()
+    n = re.sub(r"[^a-z0-9]+", " ", n)
+    return re.sub(r"\s+", " ", n).strip()
+
+
+def _episodes_of(rec, fallback_season):
+    """Flatten a member record's videos into episode dicts (movie -> 1 episode)."""
+    if rec.get("type") == "show":
+        eps = []
+        for s in rec.get("seasons", []):
+            eps.extend(s.get("episodes", []))
+        return eps
+    return [{
+        "title": rec.get("title"),
+        "episode": 1,
+        "file_id": rec.get("file_id"),
+        "name": rec.get("_video_name") or rec.get("title"),
+        "duration_ms": rec.get("duration_ms"),
+        "size": rec.get("size"),
+        "parent_id": rec.get("folder_id"),
+    }]
+
+
+def group_seasons(records, drive_names):
+    """Merge sibling season-folders (and single-show drives) into one show each.
+
+    Handles the two layouts that otherwise show one tile per season:
+      * bare "Season N" top-level folders  -> the DRIVE is the show (name = drive)
+      * "<Show> Season N" sibling folders  -> grouped by the shared show prefix
+    Nested "Show/Season N" folders already classify correctly and pass through.
+    Records sharing a normalised key merge across drives too (e.g. a show split
+    into "... (Part 1)" / "(Part 2)" drives).
+    """
+    groups = {}          # key -> {"display","drive_id","year","members":[(season,rec)]}
+    order = []           # preserve first-seen ordering for stable output
+    passthrough = []
+
+    for rec in records:
+        fname = rec.get("_folder_name")
+        drive_id = rec.get("drive_id")
+        drive_name = drive_names.get(drive_id, "") if drive_id else ""
+
+        key = display = None
+        season_num = None
+        if fname is not None:
+            ps = naming.pure_season(fname)
+            if ps is not None:
+                key = _norm_key(drive_name) or ("drive:" + str(drive_id))
+                display = _clean_show_name(drive_name) or "Unknown"
+                season_num = ps
+            else:
+                prefix, snum = naming.split_season_suffix(fname)
+                if prefix:
+                    key = _norm_key(prefix)
+                    display = _clean_show_name(prefix)
+                    season_num = snum
+
+        if key is None:
+            passthrough.append(rec)
+            continue
+
+        g = groups.get(key)
+        if g is None:
+            g = {"display": display, "drive_id": drive_id, "year": rec.get("year"),
+                 "members": []}
+            groups[key] = g
+            order.append(key)
+        if not g["year"] and rec.get("year"):
+            g["year"] = rec.get("year")
+        g["members"].append((season_num, rec))
+
+    merged = []
+    for key in order:
+        g = groups[key]
+        buckets = {}
+        for season_num, rec in g["members"]:
+            buckets.setdefault(season_num, []).extend(_episodes_of(rec, season_num))
+        seasons = []
+        for s in sorted(buckets):
+            eps = buckets[s]
+            eps.sort(key=lambda e: (e.get("episode") if e.get("episode") is not None else 10 ** 6,
+                                    (e.get("name") or "").lower()))
+            seasons.append({"season": s, "episodes": eps})
+        merged.append({
+            "id": "grp:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:16],
+            "type": "show",
+            "title": g["display"],
+            "year": g["year"],
+            "drive_id": g["drive_id"],
+            "folder_id": None,
+            "poster": None,
+            "tmdb_id": None,
+            "overview": None,
+            "seasons": seasons,
+        })
+
+    return _strip_transient(passthrough) + merged
+
+
+def _strip_transient(records):
+    """Remove the transient _folder_name/_video_name keys before persisting."""
+    for rec in records:
+        rec.pop("_folder_name", None)
+        rec.pop("_video_name", None)
     return records
 
 
@@ -493,11 +622,18 @@ class Scanner:
         self.status.update(running=True, scanned=0, total=len(selected_drives),
                            added=0, removed=0, error=None)
         try:
-            new_titles = {}
+            all_records = []
             for drive_id in selected_drives:
-                for rec in await self._scan_drive(drive_id):
-                    new_titles[rec["id"]] = rec
+                all_records.extend(await self._scan_drive(drive_id))
                 self.status["scanned"] += 1
+
+            # Merge sibling/bare season folders into single shows (needs drive names).
+            try:
+                drive_names = {d["id"]: d.get("name", "") for d in await self.api.list_drives()}
+            except Exception:
+                drive_names = {}
+            grouped = group_seasons(all_records, drive_names)
+            new_titles = {rec["id"]: rec for rec in grouped}
 
             old_titles = self.library.snapshot_titles()
             added, removed = diff_library(old_titles, new_titles)

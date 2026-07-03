@@ -120,6 +120,76 @@ def season_from_folder(name):
     return None
 
 
+def _strip_folder_noise(name):
+    """Remove bracketed groups and quality/release tokens from a folder name.
+
+    Folder names in the wild carry junk like "Season 1 (480p DVD)" or
+    "Blackadder (1983) Season 1 S01 (576p DVD x265 ...)". Stripping it first lets
+    the season detectors see the real "Season 1" / "Blackadder Season 1 S01".
+    """
+    t = _BRACKETS_RE.sub(" ", name or "")
+    t = _QUALITY_RE.sub(" ", t)
+    return _normalize_separators(t)
+
+
+def pure_season(name):
+    """Return a season number if the name is *just* a season marker, else None.
+
+    "Season 3" -> 3, "S03" -> 3, "Series 2" -> 2, "Specials" -> 0, and the same
+    with trailing junk like "Season 1 (480p DVD)". Used to detect a drive whose
+    top-level folders are bare seasons (the drive itself is the show). A name with
+    other real words (e.g. "Blackadder Season 1") is NOT pure.
+    """
+    if not name:
+        return None
+    t = _strip_folder_noise(name)
+    if t.lower() == "specials":
+        return 0
+    m = re.fullmatch(r"(?:season|series)\s*0*(\d+)", t, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    m = re.fullmatch(r"s0*(\d+)", t, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def split_season_suffix(name):
+    """Split "<Show> <season marker>" into (show_prefix, season_number).
+
+    "Blackadder Season 1 S01" -> ("Blackadder", 1); "Foo Season 2" -> ("Foo", 2);
+    "Foo S02" -> ("Foo", 2); "Foo Specials" -> ("Foo", 0). Returns (None, None)
+    when the name doesn't end in a single-season marker. A numeric RANGE like
+    "The Office Season 1-9 S01-s09" is rejected (it's a whole-series folder, not
+    one season), so such folders are left as their own record.
+    """
+    if not name:
+        return (None, None)
+    t = _strip_folder_noise(name)
+    if re.search(r"\d+\s*[-–]\s*\d+", t):  # a range (1-9, S01-S09) -> not one season
+        return (None, None)
+    # trailing bare "S01" (possibly preceded by a "Season N" word form)
+    m = re.search(r"^(.*?)\s+s0*(\d+)$", t, re.IGNORECASE)
+    if m:
+        prefix, season = m.group(1), int(m.group(2))
+        m2 = re.search(r"^(.*?)\s+(?:season|series)\s*0*(\d+)$", prefix, re.IGNORECASE)
+        if m2:
+            prefix, season = m2.group(1), int(m2.group(2))
+        prefix = prefix.strip(" -_.")
+        return (prefix, season) if prefix else (None, None)
+    # trailing "Season N" / "Series N"
+    m = re.search(r"^(.*?)\s+(?:season|series)\s*0*(\d+)$", t, re.IGNORECASE)
+    if m:
+        prefix = m.group(1).strip(" -_.")
+        return (prefix, int(m.group(2))) if prefix else (None, None)
+    # trailing "Specials"
+    m = re.search(r"^(.*?)\s+specials$", t, re.IGNORECASE)
+    if m:
+        prefix = m.group(1).strip(" -_.")
+        return (prefix, 0) if prefix else (None, None)
+    return (None, None)
+
+
 def episode_number(name):
     """Return an episode number from a filename, else None.
 

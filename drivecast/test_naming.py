@@ -128,6 +128,50 @@ def test_split_season_suffix():
     assert naming.split_season_suffix("Season 1") == (None, None)
 
 
+@pytest.mark.parametrize("name,stripped", [
+    ("01) Mission Impossible", "Mission Impossible"),
+    ("01.Iron Man (2008) [1080p]", "Iron Man (2008) [1080p]"),
+    ("1 - Something", "Something"),
+    ("1. The Thing", "The Thing"),
+    ("02) The Incredible Hulk (2008)", "The Incredible Hulk (2008)"),
+    # Real leading title numbers must NOT be stripped.
+    ("2 Fast 2 Furious", "2 Fast 2 Furious"),
+    ("300", "300"),
+    ("1917", "1917"),
+    ("9 (2009)", "9 (2009)"),
+])
+def test_strip_enum_prefix(name, stripped):
+    assert naming.strip_enum_prefix(name) == stripped
+
+
+@pytest.mark.parametrize("name,title,year", [
+    ("01) Mission Impossible (1996) [1080p]", "Mission Impossible", 1996),
+    ("01.Iron Man (2008) 1080p BluRay.mkv", "Iron Man", 2008),
+    ("02) The Incredible Hulk (2008) [1080p]", "The Incredible Hulk", 2008),
+    # Leading real number preserved through the full parse.
+    ("2 Fast 2 Furious 2003 1080p.mkv", "2 Fast 2 Furious", 2003),
+])
+def test_parse_strips_enumeration(name, title, year):
+    r = naming.parse(name)
+    assert r["title"] == title
+    assert r["year"] == year
+
+
+@pytest.mark.parametrize("folder,is_extras", [
+    ("Featurettes", True),
+    ("EXTRAS", True),
+    ("Behind the Scenes", True),
+    ("Deleted Scenes", True),
+    ("Samples", True),
+    ("Subtitles", True),
+    ("Trailers", True),
+    ("Iron Man (2008)", False),
+    ("Season 1", False),
+])
+def test_is_extras_folder(folder, is_extras):
+    assert naming.is_extras_folder(folder) is is_extras
+
+
 def test_season_parsers_ignore_quality_noise():
     from drivecast import naming
     # Real-world folder names carry bracketed quality junk.

@@ -37,6 +37,31 @@ _EP_SHORT_RE = re.compile(r"\bE0*(\d+)\b", re.IGNORECASE)
 # Files that are not the feature/episode itself.
 _SAMPLE_RE = re.compile(r"\b(?:sample|trailer|featurette|extra|extras)\b", re.IGNORECASE)
 
+# Subfolder names that hold bonus material, not the feature — skipped when a
+# folder is expanded into movies (case-insensitive, exact folder name).
+_EXTRAS_FOLDERS = {
+    "featurettes", "extras", "bonus", "behind the scenes", "deleted scenes",
+    "sample", "samples", "subs", "subtitles", "trailers",
+}
+
+# A leading enumeration prefix on a folder/file name, e.g. "01) ", "01.", "1 - ".
+# Two safe forms only:
+#   * digits + a )./- separator surrounded by spaces:  "01) X", "1 - X", "1. X"
+#   * digits + a dot immediately before a letter:       "01.Iron Man"
+# This deliberately does NOT match real leading title numbers like "2 Fast 2
+# Furious" (a space, not a separator, follows the digit) or "300"/"1917".
+_ENUM_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3}\s*[).\-]\s+|\d{1,3}\.(?=[A-Za-z]))")
+
+
+def is_extras_folder(name):
+    """True if a folder name denotes bonus material (featurettes/extras/...)."""
+    return (name or "").strip().lower() in _EXTRAS_FOLDERS
+
+
+def strip_enum_prefix(name):
+    """Remove a leading enumeration prefix ("01) ", "01.", "1 - ") from a name."""
+    return _ENUM_PREFIX_RE.sub("", name or "", count=1)
+
 
 def strip_ext(name):
     """Remove a trailing video file extension (only known video extensions)."""
@@ -247,6 +272,9 @@ def parse(name):
     """
     raw = name
     base = strip_ext(name)
+    # Drop a leading enumeration prefix ("01) ", "01.Iron Man", "1 - ...") BEFORE
+    # separator normalisation, since normalising dots would erase the "01." signal.
+    base = strip_enum_prefix(base)
     # Normalise separators first so word boundaries work even when the original
     # used dots/underscores (e.g. "Game_of_Thrones_S01E01"). Brackets are kept
     # for now and removed from the title region below.

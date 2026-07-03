@@ -56,7 +56,7 @@ class TMDB:
         return "%s|%s|%s" % (media_type, (title or "").lower(), year or "")
 
     async def enrich(self, title, year=None, media_type="movie"):
-        """Return {"tmdb_id","title","year","poster_key"} or None.
+        """Return {"tmdb_id","title","year","poster_key","overview"} or None.
 
         Negative results are cached as an explicit None marker.
         """
@@ -104,6 +104,7 @@ class TMDB:
             "title": top.get("title") or top.get("name") or title,
             "year": (top.get("release_date") or top.get("first_air_date") or "")[:4] or year,
             "poster_key": poster_key,
+            "overview": top.get("overview") or None,
         }
 
     async def _download_poster(self, poster_path, poster_key):

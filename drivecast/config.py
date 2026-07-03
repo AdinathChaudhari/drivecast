@@ -2,6 +2,7 @@
 import json
 import os
 import shutil
+import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(REPO_ROOT, "config.json")
@@ -15,7 +16,14 @@ DEFAULTS = {
     "player": "auto",
     "port": 8737,
     "page_size": 200,
+    # Library upgrade:
+    "selected_drives": [],            # Shared Drive ids to include (empty = none yet)
+    "auto_refresh_on_startup": False,  # rescan the library each launch
+    "scan_throttle": 0.15,            # seconds to pause between scan API calls
 }
+
+# Keys we persist back to config.json (avoids writing transient/unknown keys).
+SAVED_KEYS = list(DEFAULTS.keys())
 
 
 def _ensure_config_file():
@@ -44,3 +52,19 @@ def load_config():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(POSTERS_DIR, exist_ok=True)
     return merged
+
+
+def save_config(cfg):
+    """Persist the known config keys to config.json (atomic write)."""
+    out = {}
+    for k in SAVED_KEYS:
+        if k in cfg:
+            out[k] = cfg[k]
+    try:
+        os.makedirs(REPO_ROOT, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=REPO_ROOT, prefix=".config-", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(out, f, indent=2)
+        os.replace(tmp, CONFIG_PATH)
+    except OSError:
+        pass

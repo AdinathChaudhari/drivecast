@@ -28,6 +28,15 @@ _NXNN_RE = re.compile(r"\b(\d{1,2})x(\d{1,3})\b", re.IGNORECASE)
 _BRACKETS_RE = re.compile(r"[\[\(\{].*?[\]\)\}]")
 _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".wmv", ".flv", ".webm", ".mpg", ".mpeg", ".ts", ".m2ts"}
 
+# Season folder names: "Season 1", "Season 01", "Series 2", "S01", "S1".
+_SEASON_WORD_RE = re.compile(r"\b(?:season|series)\s*0*(\d+)\b", re.IGNORECASE)
+_SEASON_SHORT_RE = re.compile(r"^\s*s0*(\d+)\s*$", re.IGNORECASE)
+# Episode markers beyond SxxExx / NxNN.
+_EPISODE_WORD_RE = re.compile(r"\bepisode\s*0*(\d+)\b", re.IGNORECASE)
+_EP_SHORT_RE = re.compile(r"\bE0*(\d+)\b", re.IGNORECASE)
+# Files that are not the feature/episode itself.
+_SAMPLE_RE = re.compile(r"\b(?:sample|trailer|featurette|extra|extras)\b", re.IGNORECASE)
+
 
 def strip_ext(name):
     """Remove a trailing video file extension (only known video extensions)."""
@@ -79,6 +88,79 @@ def _title_case(text):
         else:
             out.append(w[:1].upper() + w[1:].lower() if w else w)
     return " ".join(out)
+
+
+def is_video_name(name):
+    """True if the filename has a known video extension."""
+    _, ext = os.path.splitext(name or "")
+    return ext.lower() in _VIDEO_EXTS
+
+
+def is_sample(name):
+    """True for sample/trailer/featurette/extra files that aren't the feature."""
+    return bool(_SAMPLE_RE.search(name or ""))
+
+
+def season_from_folder(name):
+    """Return a season number from a folder name, else None.
+
+    Matches "Season 1", "Series 2", "S01", "S1", and treats a "Specials"
+    folder as season 0.
+    """
+    if not name:
+        return None
+    if name.strip().lower() == "specials":
+        return 0
+    m = _SEASON_WORD_RE.search(name)
+    if m:
+        return int(m.group(1))
+    m = _SEASON_SHORT_RE.match(name)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def episode_number(name):
+    """Return an episode number from a filename, else None.
+
+    Recognises SxxExx, NxNN, "Episode 5", and a bare "E05" token.
+    """
+    ep = detect_episode(name)
+    if ep is not None:
+        return ep[1]
+    m = _EPISODE_WORD_RE.search(name)
+    if m:
+        return int(m.group(1))
+    m = _EP_SHORT_RE.search(name)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def clean_title(name):
+    """Return (title, year) for a folder or filename via parse()."""
+    p = parse(name)
+    return p["title"], p["year"]
+
+
+def episode_title(name):
+    """Best-effort episode name (the text after the SxxExx/NxNN marker), else None.
+
+    e.g. "Frasier (1993) - S05E10 - Where Every Bloke.mkv" -> "Where Every Bloke".
+    """
+    base = strip_ext(name)
+    base = re.sub(r"[._]+", " ", base)
+    m = _SXXEXX_RE.search(base) or _NXNN_RE.search(base)
+    if not m:
+        return None
+    tail = base[m.end():]
+    tail = _BRACKETS_RE.sub(" ", tail)
+    qm = _QUALITY_RE.search(tail)
+    if qm:
+        tail = tail[: qm.start()]
+    tail = tail.strip(" -_.")
+    tail = _normalize_separators(tail)
+    return _title_case(tail) if tail else None
 
 
 def parse(name):

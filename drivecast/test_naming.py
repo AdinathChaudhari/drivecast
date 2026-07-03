@@ -57,3 +57,49 @@ def test_detect_episode_variants():
     assert naming.detect_episode("Show.S02E05") == (2, 5)
     assert naming.detect_episode("Show 2x05") == (2, 5)
     assert naming.detect_episode("Show 2020") is None
+
+
+@pytest.mark.parametrize("folder,season", [
+    ("Season 1", 1),
+    ("Season 01", 1),
+    ("Series 2", 2),
+    ("S01", 1),
+    ("S3", 3),
+    ("Specials", 0),
+    ("Extras", None),
+    ("Random Folder", None),
+])
+def test_season_from_folder(folder, season):
+    assert naming.season_from_folder(folder) == season
+
+
+@pytest.mark.parametrize("name,ep", [
+    ("Show.S01E07.mkv", 7),
+    ("Show 2x09.mkv", 9),
+    ("Show - Episode 12.mkv", 12),
+    ("Show E04 1080p.mkv", 4),
+    ("Just A Movie.mkv", None),
+])
+def test_episode_number(name, ep):
+    assert naming.episode_number(name) == ep
+
+
+@pytest.mark.parametrize("name", [
+    "Movie-sample.mkv", "Cool Trailer.mp4", "Some Featurette.mkv", "The Extra.mkv",
+])
+def test_is_sample(name):
+    assert naming.is_sample(name) is True
+
+
+def test_is_sample_negative():
+    assert naming.is_sample("The Matrix 1999.mkv") is False
+
+
+def test_episode_title():
+    assert naming.episode_title("Frasier (1993) - S05E10 - Where Every Bloke.mkv") == "Where Every Bloke"
+    assert naming.episode_title("Show.S01E01.1080p.BluRay.mkv") is None  # nothing but quality after marker
+    assert naming.episode_title("No Marker Here.mkv") is None
+
+
+def test_clean_title():
+    assert naming.clean_title("Your Name (2016) [BluRay] [1080p]") == ("Your Name", 2016)

@@ -3,9 +3,13 @@
 All calls use a Bearer token from the TokenManager and ALWAYS pass
 supportsAllDrives=true / includeItemsFromAllDrives=true so Shared Drives work.
 """
+import asyncio
+import logging
 import time
 
 import httpx
+
+log = logging.getLogger("drivecast.drive_api")
 
 FILES_URL = "https://www.googleapis.com/drive/v3/files"
 
@@ -17,6 +21,11 @@ LIST_FIELDS = "nextPageToken,files(%s)" % FILE_FIELDS
 FOLDER_MIME = "application/vnd.google-apps.folder"
 
 DRIVES_CACHE_TTL = 300  # 5 minutes
+
+# Drive error reasons that mean "you're going too fast" — retry with backoff.
+RATE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
+# Exponential backoff schedule (seconds) for rate-limited requests during a scan.
+DEFAULT_BACKOFFS = (1.0, 2.0, 4.0, 8.0, 16.0)
 
 
 def escape_q(value):
@@ -35,10 +44,11 @@ class DriveAPIError(Exception):
 
 
 class DriveAPI:
-    def __init__(self, token_manager, drives_lister):
+    def __init__(self, token_manager, drives_lister, backoffs=DEFAULT_BACKOFFS):
         """
         token_manager: TokenManager instance.
         drives_lister: async callable returning the raw drives list (from rclone).
+        backoffs: exponential backoff schedule (seconds) for rate-limited GETs.
         """
         self.tokens = token_manager
         self._drives_lister = drives_lister
@@ -46,6 +56,7 @@ class DriveAPI:
         self._drives_cache = None
         self._drives_cache_at = 0.0
         self._meta_cache = {}  # file_id -> file dict
+        self._backoffs = tuple(backoffs)
 
     async def aclose(self):
         await self._client.aclose()
@@ -55,18 +66,44 @@ class DriveAPI:
         return {"Authorization": "Bearer %s" % tok}
 
     async def _get(self, url, params):
-        """GET with one 401-retry after a forced token refresh."""
-        headers = await self._auth_headers()
-        resp = await self._client.get(url, params=params, headers=headers)
-        if resp.status_code == 401:
-            await self.tokens.force_refresh()
+        """GET with a 401-retry (token refresh) and rate-limit backoff/retry.
+
+        On 403 rateLimitExceeded / userRateLimitExceeded or 429 we sleep for an
+        exponentially increasing delay and retry, so a scan survives Drive's
+        tiny per-minute quota instead of crashing. Retries are exhausted into a
+        DriveAPIError only after the whole backoff schedule fails.
+        """
+        did_auth_retry = False
+        attempt = 0
+        while True:
             headers = await self._auth_headers()
             resp = await self._client.get(url, params=params, headers=headers)
-        if resp.status_code >= 400:
-            self._raise_for(resp)
-        return resp.json()
 
-    def _raise_for(self, resp):
+            if resp.status_code == 401 and not did_auth_retry:
+                await self.tokens.force_refresh()
+                did_auth_retry = True
+                continue
+
+            if resp.status_code in (403, 429):
+                reason, message = self._error_info(resp)
+                if (resp.status_code == 429 or reason in RATE_REASONS) and attempt < len(self._backoffs):
+                    delay = self._backoffs[attempt]
+                    log.warning("Drive rate-limited (%s); backing off %.0fs (attempt %d)",
+                                reason or resp.status_code, delay, attempt + 1)
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                raise DriveAPIError(resp.status_code, message, reason)
+
+            if resp.status_code >= 400:
+                reason, message = self._error_info(resp)
+                raise DriveAPIError(resp.status_code, message, reason)
+
+            return resp.json()
+
+    @staticmethod
+    def _error_info(resp):
+        """Return (reason, message) parsed from a Drive error response body."""
         reason = None
         message = "Drive API error %s" % resp.status_code
         try:
@@ -78,6 +115,10 @@ class DriveAPI:
                 reason = errors[0].get("reason")
         except Exception:
             pass
+        return reason, message
+
+    def _raise_for(self, resp):
+        reason, message = self._error_info(resp)
         raise DriveAPIError(resp.status_code, message, reason)
 
     # ---- drives ----
@@ -164,6 +205,17 @@ class DriveAPI:
         for f in files:
             if f.get("id"):
                 self._meta_cache[f["id"]] = f
+
+    def seed_meta(self, meta):
+        """Prime the metadata cache from an external source (e.g. the library).
+
+        Lets HEAD/stream answer size/type without a Drive call for cached files.
+        """
+        if meta.get("id"):
+            self._meta_cache[meta["id"]] = meta
+
+    def has_meta(self, file_id):
+        return file_id in self._meta_cache
 
     async def file_meta(self, file_id, force=False):
         """Return metadata for a single file (cached)."""

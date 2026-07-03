@@ -12,34 +12,85 @@
       <span class="logo">▶</span><span class="brandname">drivecast</span>
     </div>
     <div class="searchwrap">
-      <input id="search" type="search" placeholder="Search all drives…" autocomplete="off">
+      <input id="search" type="search" placeholder="Search your library…" autocomplete="off">
     </div>
+    <nav class="topnav">
+      <button id="refreshBtn" class="navbtn" title="Refresh library">
+        <span class="refresh-icon">⟳</span><span class="refresh-label">Refresh</span>
+      </button>
+      <a id="settingsLink" class="navbtn" href="#/settings">Settings</a>
+      <a id="browseLink" class="navbtn ghost" href="#/browse" title="Browse raw files">Browse files</a>
+    </nav>
   </header>
 
   <div id="banner" class="banner hidden"></div>
+  <div id="scanBar" class="scanbar hidden"></div>
 
   <main>
-    <section id="continueSection" class="shelf hidden">
-      <h2>Continue Watching</h2>
-      <div id="continueRow" class="row"></div>
-    </section>
+    <!-- ===================== Library view ===================== -->
+    <div id="libraryView">
+      <section id="continueSection" class="shelf hidden">
+        <h2>Continue Watching</h2>
+        <div id="continueRow" class="row"></div>
+      </section>
 
-    <section id="drivesSection" class="shelf">
-      <h2>Shared Drives</h2>
-      <div id="drivesRow" class="row"></div>
-    </section>
+      <section id="libSection">
+        <div class="lib-head">
+          <h2>Your Library</h2>
+          <div class="filters" id="filters">
+            <button class="chip active" data-filter="all">All</button>
+            <button class="chip" data-filter="movie">Movies</button>
+            <button class="chip" data-filter="show">TV Shows</button>
+          </div>
+        </div>
+        <div id="libGrid" class="grid"></div>
+      </section>
 
-    <nav id="breadcrumb" class="breadcrumb hidden"></nav>
+      <div id="cta" class="cta hidden"></div>
+    </div>
 
-    <section id="gridSection" class="hidden">
-      <h2 id="gridTitle"></h2>
-      <div id="grid" class="grid"></div>
-      <div class="loadmore-wrap">
-        <button id="loadMore" class="loadmore hidden">Load more</button>
+    <!-- ===================== Detail view ===================== -->
+    <div id="detailView" class="hidden">
+      <button class="back" id="detailBack">‹ Back</button>
+      <div id="detailBody"></div>
+    </div>
+
+    <!-- ===================== Settings view ===================== -->
+    <div id="settingsView" class="hidden">
+      <button class="back" id="settingsBack">‹ Back</button>
+      <h2>Settings</h2>
+      <div class="settings-card">
+        <h3>Drives to include</h3>
+        <p class="muted">Only content from the drives you pick appears in your library.</p>
+        <div id="driveList" class="drive-list"></div>
+        <label class="toggle">
+          <input type="checkbox" id="autoRefresh">
+          <span>Auto-refresh library on launch</span>
+        </label>
+        <div class="settings-actions">
+          <button id="saveSettings" class="btn primary">Save</button>
+          <span id="settingsMsg" class="muted"></span>
+        </div>
       </div>
-    </section>
+    </div>
 
-    <div id="empty" class="empty hidden"></div>
+    <!-- ===================== Browse (advanced) view ===================== -->
+    <div id="browseView" class="hidden">
+      <button class="back" id="browseBack">‹ Back</button>
+      <nav id="breadcrumb" class="breadcrumb hidden"></nav>
+      <section id="drivesSection" class="shelf">
+        <h2>Shared Drives</h2>
+        <div id="drivesRow" class="row"></div>
+      </section>
+      <section id="gridSection" class="hidden">
+        <h2 id="gridTitle"></h2>
+        <div id="grid" class="grid"></div>
+        <div class="loadmore-wrap">
+          <button id="loadMore" class="loadmore hidden">Load more</button>
+        </div>
+      </section>
+      <div id="empty" class="empty hidden"></div>
+    </div>
   </main>
 
   <div id="toasts" class="toasts"></div>

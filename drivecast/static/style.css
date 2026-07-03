@@ -42,6 +42,26 @@ body {
 }
 .brandname { font-weight: 700; font-size: 18px; letter-spacing: 0.2px; }
 .searchwrap { flex: 1; max-width: 520px; }
+.topnav { display: flex; align-items: center; gap: 10px; }
+.navbtn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 999px; cursor: pointer; font-size: 13px;
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid rgba(255,255,255,0.1); text-decoration: none;
+}
+.navbtn:hover { border-color: var(--accent); }
+.navbtn.ghost { background: transparent; color: var(--muted); }
+.navbtn .refresh-icon { display: inline-block; font-size: 15px; }
+.navbtn.spinning .refresh-icon { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 720px) { .refresh-label { display: none; } }
+
+/* ---- scan bar ---- */
+.scanbar {
+  margin: 12px 28px 0; padding: 10px 16px; border-radius: 10px;
+  background: linear-gradient(90deg, rgba(122,162,255,0.16), rgba(185,140,255,0.10));
+  border: 1px solid rgba(122,162,255,0.3); color: #dfe6ff; font-size: 13px;
+}
 #search {
   width: 100%;
   padding: 10px 16px;
@@ -207,3 +227,70 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #d6d6dc; }
 .hidden { display: none !important; }
 
 .spinner { text-align: center; padding: 40px; color: var(--muted); }
+
+/* ---- library head + filters ---- */
+.lib-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
+.lib-head h2 { margin: 0; }
+.filters { display: flex; gap: 8px; }
+.chip {
+  padding: 6px 14px; border-radius: 999px; cursor: pointer; font-size: 13px;
+  background: var(--panel-2); color: var(--muted);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.chip.active { background: linear-gradient(135deg, var(--accent), var(--accent-2)); color: #0b0b10; border: none; font-weight: 600; }
+
+/* ---- call to action ---- */
+.cta { text-align: center; padding: 70px 20px; color: var(--muted); }
+.cta h2 { color: var(--text); margin-bottom: 8px; }
+.cta p { margin: 0 0 20px; }
+
+/* ---- back button ---- */
+.back {
+  background: transparent; border: none; color: var(--accent);
+  cursor: pointer; font-size: 15px; padding: 4px 0; margin-bottom: 16px;
+}
+
+/* ---- detail view ---- */
+.detail-hero { display: flex; gap: 28px; margin-bottom: 30px; flex-wrap: wrap; }
+.detail-poster { width: 220px; flex: 0 0 auto; aspect-ratio: 2/3; }
+.detail-meta { flex: 1; min-width: 260px; }
+.detail-meta h1 { margin: 0 0 6px; font-size: 28px; }
+.detail-sub { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
+.detail-overview { line-height: 1.55; color: #cfcfd6; max-width: 60ch; }
+.detail-actions { margin-top: 20px; display: flex; gap: 12px; }
+
+/* ---- season selector + episodes ---- */
+.season-select { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.season-select label { color: var(--muted); font-size: 14px; }
+.season-select select {
+  padding: 8px 14px; border-radius: 10px; background: var(--panel-2);
+  color: var(--text); border: 1px solid rgba(255,255,255,0.1); font-size: 14px;
+}
+.episodes { display: flex; flex-direction: column; gap: 6px; }
+.episode {
+  display: grid; grid-template-columns: 48px 1fr auto 24px; align-items: center; gap: 12px;
+  padding: 12px 16px; border-radius: 10px; cursor: pointer;
+  background: var(--panel); border: 1px solid rgba(255,255,255,0.05);
+}
+.episode:hover { border-color: var(--accent); background: var(--panel-2); }
+.episode .ep-num { color: var(--accent); font-weight: 600; font-size: 13px; }
+.episode .ep-title { font-size: 14px; }
+.episode .ep-dur { color: var(--muted); font-size: 12px; }
+.episode .ep-play { color: var(--muted); }
+
+/* ---- settings ---- */
+.settings-card {
+  max-width: 620px; background: var(--panel); border-radius: 16px; padding: 26px;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.settings-card h3 { margin: 0 0 6px; }
+.muted { color: var(--muted); font-size: 13px; }
+.drive-list { margin: 18px 0; display: flex; flex-direction: column; gap: 4px; }
+.drive-row, .toggle {
+  display: flex; align-items: center; gap: 10px; padding: 10px 12px;
+  border-radius: 10px; cursor: pointer;
+}
+.drive-row:hover { background: var(--panel-2); }
+.drive-row input, .toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
+.toggle { margin-top: 8px; }
+.settings-actions { margin-top: 22px; display: flex; align-items: center; gap: 14px; }

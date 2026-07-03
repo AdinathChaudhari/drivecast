@@ -78,6 +78,49 @@ This starts the server on `http://127.0.0.1:8737/` and opens your browser. Set
 If rclone can't produce a token, the web UI shows a friendly setup page instead
 of the library.
 
+To **stop** the app, press `Ctrl+C` in the terminal where it's running (or just
+close the terminal). Your player keeps playing independently — drivecast is only
+needed to start playback and feed the stream, so quitting it stops new plays but
+doesn't kill a movie already open in mpv/VLC.
+
+## Using the app (everyday flow)
+
+Once `app.py` is running and the library opens in your browser:
+
+1. **Pick a drive.** The home screen shows a **Continue Watching** shelf (empty
+   until you've watched something) and a row of all your Shared Drives. Click a
+   drive to open it.
+2. **Browse.** You'll see that drive's folders and video files. Click a folder
+   to go deeper; use the breadcrumb bar at the top to go back up. Big folders
+   load 200 items at a time — click **Load more** for the rest.
+3. **Play.** Click a video card. Your player (mpv/IINA/VLC) opens and starts
+   streaming within a few seconds. Seek anywhere — only the bytes you watch are
+   fetched. If you've watched this file before, you'll first be asked
+   **Resume from HH:MM / Start over**.
+4. **Search.** Type in the search box at the top to find any video across **all**
+   your Shared Drives at once (results appear as you type). Click a result to
+   play it.
+5. **Continue Watching.** With **mpv** (or IINA), drivecast tracks your position
+   automatically, so partly-watched titles reappear on the home shelf with a
+   progress bar and resume where you left off. With **VLC** playback works fully
+   but position isn't tracked (VLC has no simple way to report it back) — that's
+   the only reason the app nudges you toward `brew install mpv`.
+
+That's the whole loop: **run `app.py` → browse or search → click to play.** Leave
+the terminal running in the background while you watch.
+
+### Turning on posters (TMDB)
+
+By default, cards show a clean gradient placeholder with the parsed title and
+year. To get real movie/TV posters:
+
+1. Get a free API key: https://www.themoviedb.org/settings/api (Developer plan,
+   no fee). For the sign-up form, "Application URL" can be
+   `http://localhost:8737` and "Type of Use" is **Desktop Application**.
+2. Open `config.json` and set `"tmdb_api_key": "your-key-here"`.
+3. Restart `app.py`. Posters are fetched on demand and cached in
+   `data/posters/`, so they only download once.
+
 ## Configuration (`config.json`)
 
 Auto-created from `config.example.json` on first run.

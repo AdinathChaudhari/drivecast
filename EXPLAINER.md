@@ -224,3 +224,60 @@ drivecast/
 
 Run it with `python app.py`, and your cloud media library is at
 `http://127.0.0.1:8737`.
+
+---
+
+## 9. How you actually use it, day to day
+
+The whole thing boils down to three steps: **start it, browse or search, click
+to play.**
+
+**Starting it.** Open a terminal, go to the drivecast folder, and run:
+
+```
+./venv/bin/python app.py
+```
+
+The terminal prints a couple of status lines (that rclone is OK, and which
+player it found), then your browser opens to the library. Leave that terminal
+window running in the background the entire time you're watching — drivecast is
+the middleman feeding video to the player, so it needs to stay alive. When
+you're done for the day, click back to that terminal and press **Ctrl+C** to
+stop it. (A movie already open in VLC/mpv keeps playing; you just can't start
+new ones once drivecast is stopped.)
+
+**The library.** The first thing you see is a home screen with two things: a
+**Continue Watching** shelf across the top (empty at first — it fills in as you
+watch), and a row of all 40 of your Shared Drives. It looks like Netflix or
+Infuse, not a file browser.
+
+**Watching something.**
+
+1. Click a Shared Drive → you see its folders and videos as cards.
+2. Click into folders to drill down; the breadcrumb bar at the top takes you
+   back. (A folder with thousands of files shows the first 200 with a "Load
+   more" button.)
+3. Click a video → your player opens and the movie starts in a few seconds.
+   Jump to any point and it re-buffers from there almost instantly.
+4. If you've watched part of it before, drivecast first asks **"Resume from
+   42:10, or start over?"**
+
+**Finding something fast.** Instead of browsing, type a title into the search
+box at the top. drivecast asks Google to search *all* your drives at once, so a
+film buried three folders deep in some drive you forgot about shows up in a
+couple of seconds. Click the result to play.
+
+**Continue Watching** only truly works if your player is **mpv** (or IINA),
+because those let drivecast peek at your current position every few seconds. If
+you're on **VLC**, everything plays and seeks perfectly — you just won't get the
+resume shelf, because VLC won't tell drivecast where you stopped. That single
+limitation is the only reason the app suggests `brew install mpv`.
+
+**Posters.** Out of the box you'll see tidy placeholder cards (title + year on a
+gradient). If you drop a free **TMDB API key** into `config.json` (see the
+README), the cards turn into real movie and show posters — fetched once and
+cached, so it's fast forever after. This is purely cosmetic; the app works
+identically without it.
+
+That's it. There's no library to import, no scan to wait for, nothing syncs. You
+run one command and your entire cloud collection is right there to play.

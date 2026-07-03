@@ -12,3 +12,11 @@ dist/
 *.egg-info/
 assets/*.iconset/
 assets/icon_1024.png
+
+# Google OAuth credentials — SECRET, never commit
+secrets/
+client_secret*.json
+*oauth*.json
+*credentials*.json
+google_client*.json
+gdrive_client*.json

@@ -59,9 +59,11 @@ def client(tmp_path, monkeypatch):
 
     captured = {}
 
-    def _fake_play(self, file_id, name, duration_ms=None, drive_id=None, parent_id=None):
+    def _fake_play(self, file_id, name, duration_ms=None, drive_id=None,
+                   parent_id=None, queue=None):
         captured["file_id"] = file_id
         captured["duration_ms"] = duration_ms
+        captured["queue"] = queue
         return {"player": "mpv", "resumed_from": 0}
 
     monkeypatch.setattr(TokenManager, "get_token", _fake_token)
@@ -154,6 +156,45 @@ def test_play_episode_cached_duration(client):
     r = client.post("/api/play", json={"file_id": "fileE1", "name": "Ep1"})
     assert r.status_code == 200
     assert client._captured["duration_ms"] == 1500000
+
+
+def test_play_passes_queue_through(client):
+    # An autoplay queue is whitelisted and handed to PlayerManager.play.
+    r = client.post("/api/play", json={
+        "file_id": "fileE1", "name": "Ep1",
+        "queue": [
+            {"file_id": "fileE2", "name": "Ep2", "duration_ms": 1200000},
+            {"file_id": "fileE3", "name": "Ep3"},
+        ],
+    })
+    assert r.status_code == 200
+    q = client._captured["queue"]
+    assert [x["file_id"] for x in q] == ["fileE2", "fileE3"]
+    assert q[0]["duration_ms"] == 1200000
+    assert q[0]["name"] == "Ep2"
+
+
+def test_play_queue_drops_malformed_items(client):
+    # Items without a file_id (or non-dicts) are dropped; a non-list is ignored.
+    r = client.post("/api/play", json={
+        "file_id": "fileE1", "name": "Ep1",
+        "queue": [{"name": "no id"}, "garbage", {"file_id": "fileE2"}],
+    })
+    assert r.status_code == 200
+    assert [x["file_id"] for x in client._captured["queue"]] == ["fileE2"]
+
+    r2 = client.post("/api/play", json={"file_id": "fileE1", "name": "Ep1", "queue": "nope"})
+    assert r2.status_code == 200
+    assert client._captured["queue"] == []
+
+
+def test_settings_roundtrips_autoplay_next(client):
+    # Default is on; POST toggles it off and GET reflects the change.
+    assert client.get("/api/settings").json()["autoplay_next"] is True
+    r = client.post("/api/settings", json={"autoplay_next": False})
+    assert r.status_code == 200
+    assert r.json()["autoplay_next"] is False
+    assert client.get("/api/settings").json()["autoplay_next"] is False
 
 
 def test_refresh_status_shape(client):

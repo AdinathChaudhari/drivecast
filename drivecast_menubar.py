@@ -18,11 +18,14 @@ Run directly for a smoke test:
 Set DRIVECAST_NO_BROWSER=1 to skip auto-opening the browser (headless testing).
 """
 import asyncio
+import json
 import os
 import socket
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 
 import uvicorn
@@ -97,34 +100,168 @@ class ServerThread:
 
 
 # ==========================================================================
+# Local HTTP helpers + menu model. Kept rumps-free so they stay importable and
+# unit-testable (build_menu_spec) without a running NSApplication.
+# ==========================================================================
+
+def _api(method, url, payload=None, timeout=4.0):
+    """Call the local drivecast HTTP API. Returns parsed JSON or None."""
+    data = None
+    headers = {}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+        return json.loads(body) if body else {}
+    except (urllib.error.URLError, ValueError, OSError):
+        return None
+
+
+def build_menu_spec(drives, selected_ids, auto_refresh, setup_ok, port, status_text=None):
+    """Return a plain description of the menu (list of item dicts).
+
+    Pure/data-only so it can be unit-tested without rumps. Item kinds:
+      "status"   status line (title only)
+      "action"   clickable item (key identifies the callback)
+      "check"    checkable toggle (checked bool)
+      "submenu"  nested {children: [item, ...]}
+      "sep"      separator
+    """
+    selected = set(selected_ids or [])
+    status = status_text or (
+        "drivecast: running on :%d" % port if setup_ok else "drivecast: setup needed")
+
+    drive_children = []
+    if drives:
+        for d in drives:
+            drive_children.append({
+                "kind": "check", "key": "drive:%s" % d["id"],
+                "title": d.get("name") or d["id"],
+                "checked": d["id"] in selected,
+            })
+    else:
+        drive_children.append({"kind": "status", "title": "No drives found"})
+
+    return [
+        {"kind": "status", "title": status},
+        {"kind": "action", "key": "open", "title": "Open drivecast"},
+        {"kind": "sep"},
+        {"kind": "submenu", "title": "Drives to include", "children": drive_children},
+        {"kind": "action", "key": "refresh", "title": "Refresh library"},
+        {"kind": "check", "key": "auto_refresh", "title": "Auto-refresh on launch",
+         "checked": bool(auto_refresh)},
+        {"kind": "sep"},
+        {"kind": "action", "key": "quit", "title": "Quit"},
+    ]
+
+
+# ==========================================================================
 # UI (rumps). Imported lazily so the module above stays importable without it.
 # ==========================================================================
 
 def _run_app(server, port, setup_ok, url):
     import rumps
 
+    base = "http://127.0.0.1:%d" % port
+
     class DrivecastApp(rumps.App):
         def __init__(self):
             super().__init__(ICON, quit_button=None)
             self._server = server
             self._url = url
-            status = ("drivecast: running on :%d" % port if setup_ok
-                      else "drivecast: setup needed")
-            self.status_item = rumps.MenuItem(status)
-            self.menu = [
-                self.status_item,
-                rumps.MenuItem("Open drivecast", callback=self._open),
-                None,
-                rumps.MenuItem("Quit", callback=self._quit),
-            ]
+            self._setup_ok = setup_ok
+            self._drives = []
+            self._selected = []
+            self._auto_refresh = bool(config_mod.load_config().get("auto_refresh_on_startup"))
+            self._rebuild_menu()
+            # Poll the server for drive list + refresh progress after it binds.
+            self.timer = rumps.Timer(self._on_tick, 5.0)
+            self.timer.start()
 
-        def _open(self, _sender):
+        # ---- menu construction ----
+        def _rebuild_menu(self, status_text=None):
+            spec = build_menu_spec(self._drives, self._selected, self._auto_refresh,
+                                   self._setup_ok, port, status_text)
+            self.menu.clear()
+            self.menu = [self._to_item(it) for it in spec]
+
+        def _to_item(self, it):
+            kind = it["kind"]
+            if kind == "sep":
+                return None
+            if kind == "submenu":
+                parent = rumps.MenuItem(it["title"])
+                for child in it["children"]:
+                    made = self._to_item(child)
+                    if made is not None:
+                        parent.add(made)
+                return parent
+            if kind == "status":
+                return rumps.MenuItem(it["title"])
+            item = rumps.MenuItem(it["title"], callback=self._dispatch)
+            item._dc_key = it.get("key")
+            if kind == "check":
+                item.state = 1 if it.get("checked") else 0
+            return item
+
+        # ---- polling ----
+        def _on_tick(self, _sender):
+            threading.Thread(target=self._poll, daemon=True).start()
+
+        def _poll(self):
+            drives = _api("GET", base + "/api/drives")
+            settings = _api("GET", base + "/api/settings")
+            status = _api("GET", base + "/api/refresh/status")
+            if drives is not None:
+                self._drives = drives.get("drives", [])
+            if settings is not None:
+                self._selected = settings.get("selected_drives", [])
+                self._auto_refresh = bool(settings.get("auto_refresh_on_startup"))
+            status_text = None
+            if status and status.get("running"):
+                status_text = "drivecast: scanning… (%d/%d)" % (
+                    status.get("scanned", 0), status.get("total", 0))
+            self._rebuild_menu(status_text)
+
+        # ---- dispatch ----
+        def _dispatch(self, sender):
+            key = getattr(sender, "_dc_key", None)
+            if key == "open":
+                self._open()
+            elif key == "quit":
+                self._quit()
+            elif key == "refresh":
+                threading.Thread(
+                    target=lambda: _api("POST", base + "/api/refresh"), daemon=True).start()
+            elif key == "auto_refresh":
+                self._auto_refresh = not self._auto_refresh
+                sender.state = 1 if self._auto_refresh else 0
+                threading.Thread(
+                    target=lambda: _api("POST", base + "/api/settings",
+                                        {"auto_refresh_on_startup": self._auto_refresh}),
+                    daemon=True).start()
+            elif key and key.startswith("drive:"):
+                drive_id = key[len("drive:"):]
+                if drive_id in self._selected:
+                    self._selected = [d for d in self._selected if d != drive_id]
+                else:
+                    self._selected = self._selected + [drive_id]
+                sender.state = 1 if drive_id in self._selected else 0
+                threading.Thread(
+                    target=lambda: _api("POST", base + "/api/settings",
+                                        {"selected_drives": self._selected}),
+                    daemon=True).start()
+
+        def _open(self):
             try:
                 webbrowser.open(self._url)
             except Exception:
                 pass
 
-        def _quit(self, _sender):
+        def _quit(self):
             try:
                 self._server.stop()
             except Exception:

@@ -156,13 +156,36 @@ quietly closes the matching connection to Google.
    *"what's the current playback time?"* every 3 seconds and writes the answer
    into a small history file — so resume positions and the Continue Watching
    shelf stay accurate to within ~3 seconds, even if you force-quit the player.
-6. When you quit, the final position is saved. If you were past 90 % of the
-   movie, it's marked **watched** and drops off Continue Watching.
+6. When the player exits, the final position is saved and drivecast makes one
+   decision: **did this file finish, or did you quit early?** "Finished" means the
+   last position reached the end — the last 10 % of the file, or within ~90s of
+   the end (a small pure function, `should_advance(position, duration)`, so the
+   rule is unit-tested without launching anything). If it finished it's marked
+   **watched** and drops off Continue Watching; if you quit mid-file it just stops.
 
 All three players (mpv, IINA, VLC) therefore support resume. mpv stays the
 recommended default because it needs no extra interface; if VLC's HTTP interface
 can't start (an older build, or the port is busy), drivecast quietly degrades to
 launch-only for that session and everything else still works.
+
+### Autoplay next episode (and Shuffle)
+
+Playing a TV episode also hands drivecast a **queue** — the episodes that come
+after it. When an episode *finishes* (the same finished-vs-quit rule above), and
+autoplay is on, drivecast pops the next item off the queue and launches it with
+the *same* player, passing the remainder as its queue. This chains through the
+whole list, one relaunch per episode (simple, and it keeps per-episode resume
+tracking intact). If you instead **quit mid-episode**, the queue is dropped and
+the session ends — closing the player is how you stop the marathon.
+
+Only one session/queue is ever active: starting a new play stops the previous
+poller first, and the just-finished poller refuses to auto-advance if a newer
+session has already superseded it. The clicked-episode path queues the rest of
+that season; the **⤨ Shuffle** button on a show's page shuffles *all* the show's
+episodes (Fisher–Yates, in the browser) and plays them as one big queue. Autoplay
+can be turned off entirely in **Settings → Autoplay next episode**
+(`autoplay_next` in config, default on); when off, the queue is ignored and only
+the clicked item plays.
 
 ---
 
@@ -308,7 +331,7 @@ drivecast/
     ├── drive_api.py       # talks to Google: list drives, browse, search — with rate-limit backoff
     ├── library.py         # the cache: recursive scan/classify drives → library.json, diff, posters (section 6)
     ├── streaming.py       # the stream proxy / relay (section 4) — the heart
-    ├── player.py          # finds mpv/IINA/VLC, launches it (with cache/hwdec flags), mpv IPC + VLC HTTP pollers (section 5)
+    ├── player.py          # finds mpv/IINA/VLC, launches it (with cache/hwdec flags), mpv IPC + VLC HTTP pollers, autoplay queue + should_advance (section 5)
     ├── history.py         # history.json: positions, watched flags, Continue Watching, watched-map
     ├── naming.py          # filename/folder → clean {title, year, season/episode, quality}; season/enum/extras helpers
     ├── tmdb.py            # poster fetching + caching (pre-cached/backfilled during the scan)

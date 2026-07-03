@@ -214,23 +214,32 @@ Once `app.py` is running and the library opens in your browser:
    offline search over the cached library.
 4. **Open a title.** Click a movie tile for its detail page (poster, overview,
    **Play**). Click a show tile for its detail page with a **season selector** and
-   that season's episodes in order — click an episode to play it.
+   that season's episodes in order — click an episode to play it. A **⤨ Shuffle**
+   button plays every episode of the show in a random order.
 5. **Play.** Your player (mpv/IINA/VLC) opens and starts streaming within a
    couple of seconds (duration/size come from the cache, so there's no blocking
    metadata call). Seek anywhere — only the bytes you watch are fetched. If you've
    watched this file before, you'll first be asked **Resume / Start over**.
-6. **Continue Watching.** With **mpv**, **IINA** *or* **VLC**, drivecast tracks
+6. **Autoplay next episode.** When you start an episode, the rest of that season
+   queues up behind it; when the episode **finishes** the next one starts
+   automatically, chaining through the queue (and through the whole show when you
+   press **Shuffle**). "Finished" means the player reached the end — the last 10%
+   of the file, or within ~90s of the end. If you instead **quit mid-episode**
+   (close the player before the end), the session simply stops — no autoplay. Turn
+   the whole feature off with **Settings → Autoplay next episode**.
+7. **Continue Watching.** With **mpv**, **IINA** *or* **VLC**, drivecast tracks
    your position automatically (VLC via its HTTP interface), so partly-watched
    titles (including the right *episode* of a show) reappear on the home shelf and
    resume where you left off. mpv stays the recommended default; if VLC's HTTP
-   interface can't start, playback still works, just without resume tracking.
-7. **Refresh.** When you add or remove content on the drives, click **Refresh**
+   interface can't start, playback still works, just without resume tracking (and
+   without autoplay, which needs the position to know the episode finished).
+8. **Refresh.** When you add or remove content on the drives, click **Refresh**
    (top bar) or the menu-bar **Refresh library** item. drivecast rescans, adds
    new titles, removes deleted ones, updates show episode lists, and backfills
    posters for any title still missing one (so enabling a TMDB key and hitting
    Refresh gives every existing tile a poster) — all without disturbing what
    you're watching.
-8. **Browse raw files (advanced).** The **Browse files** link still gives you the
+9. **Browse raw files (advanced).** The **Browse files** link still gives you the
    old live folder-by-folder browser over any drive, if you ever need it.
 
 ### Turning on posters (TMDB)
@@ -302,8 +311,9 @@ only — secrets go in `secrets/` (above).
 | `selected_drives` | `[]`   | Shared Drive ids included in the library            |
 | `auto_refresh_on_startup` | `false` | rescan the library on each launch        |
 | `scan_throttle` | `0.15`   | seconds to pause between scan API calls (quota)     |
+| `autoplay_next` | `true`   | auto-play the next episode when one finishes        |
 
-`selected_drives` and `auto_refresh_on_startup` are normally set from the
+`selected_drives`, `auto_refresh_on_startup` and `autoplay_next` are normally set from the
 **Settings** view or the menu-bar app rather than by hand. (`tmdb_api_key` is a
 secret — set it in `secrets/secrets.json`, not here.)
 

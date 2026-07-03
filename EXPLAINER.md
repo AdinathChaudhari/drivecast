@@ -186,6 +186,20 @@ classifies every top-level folder:
 - Loose videos sitting at a drive's root are parsed by filename: `SxxExx` files
   group into a show; everything else is a standalone movie.
 
+**Grouping seasons into one show.** Real drives store seasons in wildly different
+ways, so after the first pass drivecast merges them so each show is a single tile:
+
+- `The Office/Season 1/…` — seasons nested under a show folder (already one show).
+- `Blackadder Season 1 S01`, `Blackadder Season 2 S02`, … — separate top-level
+  folders sharing a name prefix are grouped under that prefix (`Blackadder`).
+- `Season 1`, `Season 2`, … as bare folders — the **whole drive** is the show, so
+  they're grouped under the drive's name (`Fraiser`).
+- A show split across `… (Part 1)` / `(Part 2)` drives merges into one show.
+
+Quality noise in folder names (`Season 1 (480p DVD)`,
+`Blackadder (1983) S01 (576p x265 …)`) is stripped before detection, and a
+whole-series wrapper named as a range (`Season 1-9 S01-s09`) is left as-is.
+
 The result is written to **`data/library.json`** (atomically) as structured
 records — title, year, type, and for shows the full season/episode tree, with
 each file's size and **duration** pulled straight from the list response so

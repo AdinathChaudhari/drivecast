@@ -24,7 +24,7 @@ SYNTHETIC = {
         "movieA": {
             "id": "movieA", "type": "movie", "title": "Arrival", "year": 2016,
             "drive_id": "drv1", "folder_id": "movieA", "poster": None,
-            "tmdb_id": None, "overview": "aliens",
+            "tmdb_id": None, "overview": "aliens", "quality": "4K",
             "file_id": "fileA", "size": 5000, "duration_ms": 7200000,
         },
         "showB": {
@@ -87,6 +87,19 @@ def test_library_endpoint_serves_cache(client):
     assert titles == {"Arrival", "The Bear"}
     assert data["selected_drives"] == ["drv1"]
     assert data["scanning"] is False
+    # Quality field is serialized straight through from the record.
+    arrival = next(t for t in data["titles"] if t["title"] == "Arrival")
+    assert arrival["quality"] == "4K"
+
+
+def test_watched_map_endpoint(client):
+    # Record a play position, then the watched-map exposes its last_played.
+    client.post("/api/play", json={"file_id": "fileA", "name": "Arrival"})
+    client.app.state.dc.history.update("fileA", position=120.0, duration=7200.0, force=True)
+    r = client.get("/api/watched-map")
+    assert r.status_code == 200
+    m = r.json()["map"]
+    assert "fileA" in m and m["fileA"] > 0
 
 
 def test_title_endpoint(client):

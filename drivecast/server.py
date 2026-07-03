@@ -278,6 +278,12 @@ def create_app(cfg=None):
         state = app.state.dc
         return {"items": state.history.continue_watching()}
 
+    @app.get("/api/watched-map")
+    async def api_watched_map():
+        """file_id -> last_played epoch, for the client-side "Recently watched" sort."""
+        state = app.state.dc
+        return {"map": state.history.last_played_map()}
+
     @app.post("/api/enrich")
     async def api_enrich(request: Request):
         """Batch parse filenames and (optionally) enrich with TMDB."""

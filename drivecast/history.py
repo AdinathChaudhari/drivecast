@@ -117,6 +117,16 @@ class History:
         with self._lock:
             self._write_atomic()
 
+    def last_played_map(self):
+        """Return {file_id: last_played_epoch} for every tracked entry.
+
+        Lets the UI sort titles by "Recently watched" (including finished ones,
+        which the Continue Watching shelf deliberately omits).
+        """
+        with self._lock:
+            return {fid: float(e.get("last_played") or 0.0)
+                    for fid, e in self._data.items()}
+
     def continue_watching(self):
         """Return partially-watched items for the Continue Watching shelf."""
         with self._lock:

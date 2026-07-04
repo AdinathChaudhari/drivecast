@@ -558,7 +558,12 @@ def create_app(cfg=None):
         port = int(state.cfg.get("port", 8737))
         token = state.cfg.get("remote_token") or ""
         urls = []
-        # Tailscale first (works from anywhere, encrypted), then LAN.
+        # Tailscale Serve HTTPS first (valid cert - survives HTTPS-Only
+        # Safari), then plain-HTTP tailnet, then LAN.
+        serve_url = _tailscale_serve_url(port)
+        if serve_url:
+            urls.append({"label": "Tailscale (HTTPS)",
+                         "url": "%s/?token=%s" % (serve_url, token)})
         ts_ip = _tailscale_ip()
         if ts_ip:
             urls.append({"label": "Tailscale", "url": _remote_url(ts_ip, port, token)})
@@ -579,13 +584,17 @@ def create_app(cfg=None):
             return JSONResponse({"error": "remote_disabled"}, status_code=404)
         port = int(state.cfg.get("port", 8737))
         token = state.cfg.get("remote_token") or ""
-        ip = _tailscale_ip() or _lan_ip()
-        if not ip:
-            return JSONResponse({"error": "no_url"}, status_code=404)
+        serve_url = _tailscale_serve_url(port)
+        if serve_url:
+            url = "%s/?token=%s" % (serve_url, token)
+        else:
+            ip = _tailscale_ip() or _lan_ip()
+            if not ip:
+                return JSONResponse({"error": "no_url"}, status_code=404)
+            url = _remote_url(ip, port, token)
         import qrcode
         import qrcode.image.svg
-        img = qrcode.make(_remote_url(ip, port, token),
-                          image_factory=qrcode.image.svg.SvgPathImage)
+        img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage)
         buf = io.BytesIO()
         img.save(buf)
         return Response(content=buf.getvalue(), media_type="image/svg+xml")
@@ -656,6 +665,31 @@ def _tailscale_ip():
             except ValueError:
                 pass
             break  # only inspect the first non-empty line
+    return None
+
+
+def _tailscale_serve_url(port):
+    """HTTPS URL when `tailscale serve` proxies this port, else None. Silent.
+
+    Serve terminates TLS with a real certificate for the machine's ts.net
+    name — the fix for phones with HTTPS-Only Safari, which refuse the plain
+    http:// IP URLs.
+    """
+    for cmd in (["tailscale", "serve", "status"],
+                ["/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+                 "serve", "status"]):
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2.0)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode != 0:
+            continue
+        text = proc.stdout or ""
+        if (":%d" % port) not in text:
+            continue  # serve is on, but proxying something else
+        for word in text.split():
+            if word.startswith("https://"):
+                return word.rstrip("/")
     return None
 
 

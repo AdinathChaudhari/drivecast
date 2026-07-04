@@ -179,6 +179,13 @@ Mac. This is **off by default**.
      (`brew install` / App Store, on the same tailnet), then scan the QR.
      Works from anywhere — home, a cafe, cellular — and the traffic is
      encrypted end-to-end.
+
+     If your phone's Safari has **HTTPS-Only mode** on it will refuse the
+     plain `http://100.x…` URL. Fix it properly with **Tailscale Serve**,
+     which gives drivecast a real HTTPS address with a valid certificate:
+     run `tailscale serve --bg 8737` on the Mac (first time, it prints a
+     link to enable Serve for your tailnet — one click), and drivecast's QR
+     automatically switches to the `https://<mac>.<tailnet>.ts.net` URL.
    - **Same Wi-Fi** — no extra install; just scan the QR while your phone and
      Mac are on the same network. Only works on that network.
 3. Scan the QR (or open the URL). The link carries a secret **token** —

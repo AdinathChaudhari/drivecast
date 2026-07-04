@@ -561,3 +561,33 @@ def test_tailscale_ip_filters_cgnat_range(monkeypatch):
     # Non-zero exit from both candidate commands -> None.
     monkeypatch.setattr(server_mod.subprocess, "run", lambda *a, **k: _Proc("", rc=1))
     assert server_mod._tailscale_ip() is None
+
+
+def test_remote_prefers_tailscale_serve_https(client, monkeypatch):
+    # With `tailscale serve` proxying our port, the HTTPS ts.net URL is listed
+    # first and the QR uses it (fixes HTTPS-Only Safari on iOS).
+    monkeypatch.setattr(server_mod, "_tailscale_serve_url",
+                        lambda port: "https://mac.tailnet.ts.net")
+    monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: "100.1.2.3")
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: "192.168.1.9")
+    client.app.state.dc.cfg["remote_access"] = True
+    client.app.state.dc.cfg["remote_token"] = "tok123"
+    body = client.get("/api/remote").json()
+    labels = [u["label"] for u in body["urls"]]
+    assert labels[0] == "Tailscale (HTTPS)"
+    assert body["urls"][0]["url"] == "https://mac.tailnet.ts.net/?token=tok123"
+    qr = client.get("/api/remote/qr")
+    assert qr.status_code == 200
+    assert qr.headers["content-type"].startswith("image/svg")
+
+
+def test_serve_url_parses_status_output(monkeypatch):
+    class _P:
+        returncode = 0
+        stdout = ("https://mac.tailnet.ts.net (tailnet only)\n"
+                  "|-- / proxy http://127.0.0.1:8737\n")
+        stderr = ""
+
+    monkeypatch.setattr(server_mod.subprocess, "run", lambda *a, **k: _P())
+    assert server_mod._tailscale_serve_url(8737) == "https://mac.tailnet.ts.net"
+    assert server_mod._tailscale_serve_url(9999) is None   # different port

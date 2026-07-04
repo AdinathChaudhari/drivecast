@@ -187,6 +187,22 @@ can be turned off entirely in **Settings → Autoplay next episode**
 (`autoplay_next` in config, default on); when off, the queue is ignored and only
 the clicked item plays.
 
+### English subtitles (found for you, cached forever)
+
+Before the player launches, drivecast tries to find an English subtitle for the
+file — bounded to a few seconds and failure-silent, so playback never waits on
+it. Three sources, in order: the **local cache** (`data/subs/`, keyed by the
+video's file id — instant on every replay); a **sibling subtitle file in the
+video's own Drive folder** (release folders very often ship an `.srt` next to
+the movie — matched by filename stem, SxxExx marker and language tags, then
+downloaded once); and **OpenSubtitles**, when a free API key sits in secrets —
+searched by the parsed title plus year or season/episode, best English match
+taken. Whatever wins is stored as a local file and handed to the player
+(`--sub-file` for mpv and friends), so subtitles arrive pre-loaded in all three
+players with zero player-side setup. Autoplay-advanced episodes reuse whatever
+is already cached. **Settings → English subtitles when available** switches the
+whole thing off.
+
 ---
 
 ## 6. The library cache (and browsing, search, posters)
@@ -365,10 +381,15 @@ drivecast/
     ├── library.py         # the cache: recursive scan/classify drives → library.json, diff, posters (section 6)
     ├── streaming.py       # the stream proxy / relay (section 4) — the heart
     ├── player.py          # finds mpv/IINA/VLC, launches it (with cache/hwdec flags), mpv IPC + VLC HTTP pollers, autoplay queue + should_advance (section 5)
-    ├── history.py         # history.json: positions, watched flags, Continue Watching, watched-map
-    ├── naming.py          # filename/folder → clean {title, year, season/episode, quality}; season/enum/extras helpers
-    ├── tmdb.py            # poster fetching + caching (pre-cached/backfilled during the scan)
-    ├── server.py          # the web API: /api/library, /api/title, /api/refresh, /api/settings, /stream, …
+    ├── history.py         # history.json: positions, watched flags, Continue Watching, watched-map, progress
+    ├── naming.py          # filename/folder → clean {title, year, season/episode, quality}; lesson numbers, junk filter
+    ├── tmdb.py            # poster fetching + caching + genre ids (drives the category chips)
+    ├── sections.py        # drive→section assignment, categories, custom private section plugins
+    ├── courses.py         # courses classifier: modules/lessons/materials from course drives
+    ├── playlists.py       # podcasts classifier: channel folders → shows
+    ├── scan_cache.py      # raw per-drive scan records — the per-drive-refresh keystone
+    ├── subtitles.py       # English subs: sibling .srt on the drive, or OpenSubtitles (cached locally)
+    ├── server.py          # the web API: /api/library, /api/title, /api/refresh, /api/sections, /stream, …
     └── static/            # the library UI: one HTML page, one JS file, one CSS file
 
 Config, data and secrets live outside the tree, in

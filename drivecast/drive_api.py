@@ -175,6 +175,9 @@ class DriveAPI:
     # Drive reports some audio containers (notably .m4b audiobooks) as
     # application/octet-stream — fall back to the extension for those.
     _AUDIO_EXTS = (".mp3", ".m4a", ".m4b", ".aac", ".flac", ".ogg", ".opus", ".wav")
+    # Subtitle files get inconsistent mimes (text/plain, octet-stream, x-subrip)
+    # — extension is the only reliable signal.
+    _SUB_EXTS = (".srt", ".vtt", ".ass", ".sub")
 
     def _filter_browse(self, files, kinds=("video",)):
         """Keep folders plus files whose mime family is in `kinds`."""
@@ -193,11 +196,28 @@ class DriveAPI:
                         and name.endswith(self._AUDIO_EXTS)):
                     out.append(f)
                     break
+                if k == "subs" and name.endswith(self._SUB_EXTS):
+                    out.append(f)
+                    break
                 prefix = self._KIND_PREFIXES.get(k)
                 if prefix and mime.startswith(prefix):
                     out.append(f)
                     break
         return out
+
+    async def fetch_file_bytes(self, file_id, max_size=2 * 1024 * 1024):
+        """Download a small file's content (subtitles); None on error/too big."""
+        try:
+            headers = await self._auth_headers()
+            resp = await self._client.get(
+                "%s/%s" % (FILES_URL, file_id),
+                params={"alt": "media", "supportsAllDrives": "true"},
+                headers=headers, follow_redirects=True)
+            if resp.status_code == 200 and len(resp.content) <= max_size:
+                return resp.content
+        except httpx.HTTPError:
+            pass
+        return None
 
     # ---- search ----
 

@@ -146,6 +146,24 @@ key (or when TMDB has no match), the scan falls back to the video file's own
 **Google Drive thumbnail**; only titles with neither show a clean gradient
 placeholder card (parsed title + year).
 
+### 5. (Optional) Subtitles
+
+drivecast loads **English subtitles automatically** when it can find them,
+resolved at play time and cached locally (`data/subs/`):
+
+1. a subtitle file sitting **next to the video on the drive** (release folders
+   very often ship an `.srt`) — matched by name and downloaded once;
+2. **OpenSubtitles**, if you put a free API key from
+   https://www.opensubtitles.com/consumers into
+   `~/Library/Application Support/drivecast/secrets/secrets.json` as
+   `{"opensubtitles_api_key": "…"}` — searched by parsed title (+ year or
+   season/episode), best English match downloaded.
+
+The subtitle is handed to mpv / IINA / VLC as a local file, so it appears
+pre-loaded (toggle it in the player as usual). Autoplay-advanced episodes
+reuse cached subtitles. Turn the whole feature off with **Settings → English
+subtitles when available**.
+
 ## Run
 
 ```sh
@@ -321,7 +339,7 @@ and is loaded at runtime:
 - **API keys** → `~/Library/Application Support/drivecast/secrets/secrets.json`:
 
   ```json
-  { "tmdb_api_key": "your-tmdb-key" }
+  { "tmdb_api_key": "your-tmdb-key", "opensubtitles_api_key": "your-os-key" }
   ```
   (The repo ships `secrets/secrets.example.json` only as a format reference.)
 
@@ -365,6 +383,7 @@ only — secrets go in `secrets/` (above).
 | `auto_refresh_on_startup` | `false` | rescan the library on each launch        |
 | `scan_throttle` | `0.15`   | seconds to pause between scan API calls (quota)     |
 | `autoplay_next` | `true`   | auto-play the next episode when one finishes        |
+| `subtitles`    | `true`    | load English subtitles when available               |
 
 `selected_drives`, `auto_refresh_on_startup` and `autoplay_next` are normally set from the
 **Settings** view or the menu-bar app rather than by hand. (`tmdb_api_key` is a
@@ -381,6 +400,7 @@ rebuilds):
   rebuild the whole library without re-walking the other drives
 - `history.json` — resume positions & watched state, keyed by Drive file id
 - `tmdb_cache.json` — cached TMDB lookups (including negative results)
+- `subs/` — downloaded subtitles, keyed by video file id
 - `posters/` — downloaded artwork: TMDB w342 posters, plus `dthumb_*.jpg`
   Google Drive thumbnails cached as fallbacks
 

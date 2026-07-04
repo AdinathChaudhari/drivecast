@@ -135,3 +135,17 @@ def test_advance_skips_when_session_superseded():
     stop.set()  # a newer play() replaced this session
     pm._advance("mpv", "/mpv", QUEUE, "drv", "s1", stop)
     assert pm._calls == []
+
+
+def test_build_args_include_subtitle_path():
+    from drivecast.player import build_iina_args, build_mpv_args, build_vlc_args
+    mpv = build_mpv_args("mpv", "/tmp/s.sock", 0, "X", "http://u", sub_path="/tmp/x.srt")
+    assert "--sub-file=/tmp/x.srt" in mpv
+    assert mpv[-1] == "http://u"           # url stays last
+    iina = build_iina_args("iina", "/tmp/s.sock", 0, "X", "http://u", sub_path="/tmp/x.srt")
+    assert "--mpv-sub-file=/tmp/x.srt" in iina
+    vlc = build_vlc_args("vlc", 0, "X", "http://u", 8738, "pw", sub_path="/tmp/x.srt")
+    i = vlc.index("--sub-file")
+    assert vlc[i + 1] == "/tmp/x.srt"
+    # No sub -> no flag anywhere.
+    assert not any("sub-file" in a for a in build_mpv_args("mpv", "/tmp/s", 0, "X", "u"))

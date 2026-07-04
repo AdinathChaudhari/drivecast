@@ -70,8 +70,9 @@ def client(tmp_path, monkeypatch):
     captured = {}
 
     def _fake_play(self, file_id, name, duration_ms=None, drive_id=None,
-                   parent_id=None, queue=None, media=None):
+                   parent_id=None, queue=None, media=None, sub_path=None):
         captured["media"] = media
+        captured["sub_path"] = sub_path
         captured["file_id"] = file_id
         captured["duration_ms"] = duration_ms
         captured["queue"] = queue
@@ -88,6 +89,9 @@ def client(tmp_path, monkeypatch):
 
     app = server_mod.create_app(cfg)
     with TestClient(app) as c:
+        # Keep the subtitle cache in the temp dir; Drive lookups already fail
+        # loudly via the _no_network stub.
+        c.app.state.dc.subtitles.subs_dir = str(tmp_path / "subs")
         c._captured = captured
         yield c
 
@@ -302,3 +306,36 @@ def test_watched_map_progress_shape(client):
     assert "map" in body and "progress" in body
     p = body["progress"]["fileA"]
     assert p["percent"] == 50.0 and p["watched"] is False
+
+
+def test_play_resolves_and_passes_subtitle(client, tmp_path):
+    async def _fake_resolve(file_id, name, drive_id=None, parent_id=None):
+        return str(tmp_path / "subs" / ("%s.srt" % file_id))
+
+    client.app.state.dc.subtitles.resolve = _fake_resolve
+    r = client.post("/api/play", json={"file_id": "fileA", "name": "Arrival"})
+    assert r.status_code == 200
+    assert r.json()["subtitles"] is True
+    assert client._captured["sub_path"].endswith("fileA.srt")
+
+
+def test_play_subtitles_toggle_off(client):
+    calls = []
+
+    async def _spy_resolve(*a, **k):
+        calls.append(a)
+        return None
+
+    client.app.state.dc.subtitles.resolve = _spy_resolve
+    client.post("/api/settings", json={"subtitles": False})
+    r = client.post("/api/play", json={"file_id": "fileA", "name": "Arrival"})
+    assert r.status_code == 200
+    assert r.json()["subtitles"] is False
+    assert calls == []                     # resolver never consulted
+    assert client._captured["sub_path"] is None
+
+
+def test_settings_roundtrips_subtitles(client):
+    assert client.get("/api/settings").json()["subtitles"] is True
+    client.post("/api/settings", json={"subtitles": False})
+    assert client.get("/api/settings").json()["subtitles"] is False

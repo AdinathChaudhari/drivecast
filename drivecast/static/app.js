@@ -758,6 +758,7 @@ async function openSettings() {
   $("autoRefresh").checked = !!settings.auto_refresh_on_startup;
   state.autoplayNext = settings.autoplay_next !== false;
   if ($("autoplayNext")) $("autoplayNext").checked = state.autoplayNext;
+  if ($("subtitlesOn")) $("subtitlesOn").checked = settings.subtitles !== false;
   const sel = $("playerSelect");
   if (sel) {
     sel.value = settings.player || "auto";
@@ -842,6 +843,7 @@ async function saveSettings() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ selected_drives: selected, drive_sections: driveSections,
         auto_refresh_on_startup: auto, autoplay_next: autoplay,
+        subtitles: $("subtitlesOn") ? $("subtitlesOn").checked : true,
         player: ($("playerSelect") || {}).value || "auto" }),
     });
     $("settingsMsg").textContent = "Saved.";
@@ -897,7 +899,8 @@ async function launch(fileId, name, durMs, driveId, parentId, startOver, queue, 
       }),
     });
     const from = res.resumed_from > 1 ? ` (resumed at ${fmtTime(res.resumed_from)})` : "";
-    toast(`Playing in ${res.player}${from}`, "success");
+    const subs = res.subtitles ? " · EN subs" : "";
+    toast(`Playing in ${res.player}${from}${subs}`, "success");
     if (res.player === "vlc") showVlcBanner();
     setTimeout(loadContinue, 1500);
   } catch (e) {
@@ -906,11 +909,15 @@ async function launch(fileId, name, durMs, driveId, parentId, startOver, queue, 
   }
 }
 
+// Informational only — show briefly and get out of the way (the scan bar
+// stays sticky because it reports crucial in-flight work; this doesn't).
 function showVlcBanner() {
   const b = $("banner");
   b.innerHTML = "Playing in VLC — resume &amp; Continue Watching are tracked via VLC's " +
     "HTTP interface. If resume doesn't stick, update VLC or install mpv: <code>brew install mpv</code>";
   show(b, true);
+  clearTimeout(showVlcBanner._timer);
+  showVlcBanner._timer = setTimeout(() => show(b, false), 6000);
 }
 
 $("btnResume").addEventListener("click", async () => {

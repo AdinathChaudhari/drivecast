@@ -80,11 +80,12 @@ def should_advance(position, duration):
     return (duration - position) <= FINISH_TAIL_SECONDS
 
 
-def build_mpv_args(path, sock, resume, name, url, media=None):
+def build_mpv_args(path, sock, resume, name, url, media=None, sub_path=None):
     """Construct the mpv command line (IPC + resume + title + cache/hwdec).
 
     Audio-only files need --force-window: mpv runs with --no-terminal, so
     without a window there'd be no UI at all to pause/seek/quit from.
+    `sub_path` is a LOCAL subtitle file to preload alongside the stream.
     """
     args = [
         path,
@@ -96,29 +97,34 @@ def build_mpv_args(path, sock, resume, name, url, media=None):
     ]
     if media == "audio":
         args.append("--force-window=immediate")
+    if sub_path:
+        args.append("--sub-file=%s" % sub_path)
     args.append(url)
     return args
 
 
-def build_iina_args(path, sock, resume, name, url):
+def build_iina_args(path, sock, resume, name, url, sub_path=None):
     """Construct the IINA command line (mpv-prefixed IPC + resume + cache/hwdec)."""
-    return [
+    args = [
         path,
         "--mpv-input-ipc-server=%s" % sock,
         "--mpv-start=%d" % int(resume),
         "--mpv-force-media-title=%s" % name,
         *IINA_CACHE_FLAGS,
-        url,
     ]
+    if sub_path:
+        args.append("--mpv-sub-file=%s" % sub_path)
+    args.append(url)
+    return args
 
 
-def build_vlc_args(path, resume, name, url, http_port, http_password):
+def build_vlc_args(path, resume, name, url, http_port, http_password, sub_path=None):
     """Construct the VLC command line with its HTTP interface + resume enabled.
 
     The HTTP interface lets us poll playback position (see parse_vlc_status);
     --start-time resumes and --play-and-exit closes VLC when the file ends.
     """
-    return [
+    args = [
         path,
         "--extraintf", "http",
         "--http-host", "127.0.0.1",
@@ -127,8 +133,11 @@ def build_vlc_args(path, resume, name, url, http_port, http_password):
         "--start-time=%d" % int(resume),
         "--play-and-exit",
         "--meta-title", name,
-        url,
     ]
+    if sub_path:
+        args += ["--sub-file", sub_path]
+    args.append(url)
+    return args
 
 
 def parse_vlc_status(xml_text):
@@ -194,6 +203,9 @@ class PlayerManager:
         self.cfg = cfg
         self.history = history
         self.base_url = base_url.rstrip("/")
+        # Optional sync file_id -> cached subtitle path lookup (set by the
+        # server) so autoplay-advanced episodes pick up cached subs too.
+        self.sub_cache_lookup = None
         self._session = None  # dict for the currently tracked session
         self._session_lock = threading.Lock()
 
@@ -201,7 +213,7 @@ class PlayerManager:
         return "%s/stream/%s" % (self.base_url, file_id)
 
     def play(self, file_id, name, duration_ms=None, drive_id=None, parent_id=None,
-             queue=None, media=None):
+             queue=None, media=None, sub_path=None):
         """Launch the configured player at the resume position.
 
         `queue` is an optional ordered list of upcoming items
@@ -226,13 +238,14 @@ class PlayerManager:
         self._stop_current_session()
 
         resume = self._launch(kind, path, file_id, name, duration_ms,
-                              drive_id, parent_id, list(queue or []), media=media)
+                              drive_id, parent_id, list(queue or []), media=media,
+                              sub_path=sub_path)
         return {"player": kind, "resumed_from": resume}
 
     # ---- launchers ----
 
     def _launch(self, kind, path, file_id, name, duration_ms, drive_id, parent_id, queue,
-                media=None):
+                media=None, sub_path=None):
         """Resolve resume/url/duration and dispatch to the per-player launcher.
 
         Shared by play() and the autoplay-advance path so both start a session
@@ -243,32 +256,38 @@ class PlayerManager:
         duration = (float(duration_ms) / 1000.0) if duration_ms else None
         if kind == "mpv":
             self._launch_mpv(path, file_id, name, url, resume, duration, drive_id,
-                             parent_id, queue, media=media)
+                             parent_id, queue, media=media, sub_path=sub_path)
         elif kind == "iina":
-            self._launch_iina(path, file_id, name, url, resume, duration, drive_id, parent_id, queue)
+            self._launch_iina(path, file_id, name, url, resume, duration, drive_id,
+                              parent_id, queue, sub_path=sub_path)
         else:  # vlc
-            self._launch_vlc(path, file_id, name, url, resume, duration, drive_id, parent_id, queue)
+            self._launch_vlc(path, file_id, name, url, resume, duration, drive_id,
+                             parent_id, queue, sub_path=sub_path)
         return resume
 
     def _launch_mpv(self, path, file_id, name, url, resume, duration, drive_id,
-                    parent_id, queue, media=None):
+                    parent_id, queue, media=None, sub_path=None):
         sock = "/tmp/drivecast-%s.sock" % uuid.uuid4().hex[:12]
-        args = build_mpv_args(path, sock, resume, name, url, media=media)
+        args = build_mpv_args(path, sock, resume, name, url, media=media,
+                              sub_path=sub_path)
         proc = subprocess.Popen(args)
         self._start_poller("mpv", path, proc, sock, file_id, name, duration,
                            drive_id, parent_id, queue)
 
-    def _launch_iina(self, path, file_id, name, url, resume, duration, drive_id, parent_id, queue):
+    def _launch_iina(self, path, file_id, name, url, resume, duration, drive_id,
+                     parent_id, queue, sub_path=None):
         sock = "/tmp/drivecast-%s.sock" % uuid.uuid4().hex[:12]
-        args = build_iina_args(path, sock, resume, name, url)
+        args = build_iina_args(path, sock, resume, name, url, sub_path=sub_path)
         proc = subprocess.Popen(args)
         self._start_poller("iina", path, proc, sock, file_id, name, duration,
                            drive_id, parent_id, queue)
 
-    def _launch_vlc(self, path, file_id, name, url, resume, duration, drive_id, parent_id, queue):
+    def _launch_vlc(self, path, file_id, name, url, resume, duration, drive_id,
+                    parent_id, queue, sub_path=None):
         http_port = _find_free_port()
         http_password = uuid.uuid4().hex
-        args = build_vlc_args(path, resume, name, url, http_port, http_password)
+        args = build_vlc_args(path, resume, name, url, http_port, http_password,
+                              sub_path=sub_path)
         try:
             proc = subprocess.Popen(args)
         except OSError as exc:
@@ -303,11 +322,17 @@ class PlayerManager:
         if not queue:
             return
         nxt, rest = queue[0], queue[1:]
+        sub_path = None
+        if self.sub_cache_lookup:
+            try:
+                sub_path = self.sub_cache_lookup(nxt.get("file_id"))
+            except Exception:  # pragma: no cover - defensive
+                sub_path = None
         try:
             self._launch(kind, path, nxt.get("file_id"),
                          nxt.get("name") or nxt.get("file_id"),
                          nxt.get("duration_ms"), drive_id, parent_id, rest,
-                         media=nxt.get("media"))
+                         media=nxt.get("media"), sub_path=sub_path)
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("autoplay advance failed: %r", exc)
 

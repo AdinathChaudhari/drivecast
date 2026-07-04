@@ -16,6 +16,7 @@ from .library import Library, Scanner
 from .player import PlayerError, PlayerManager, detect_player
 from .rclone_auth import RcloneError, TokenManager
 from .scan_cache import ScanCache
+from .subtitles import SubtitleResolver
 from .streaming import Streamer
 from .tmdb import TMDB
 
@@ -41,6 +42,9 @@ class AppState:
                                cache=ScanCache())
         port = cfg.get("port", 8737)
         self.player = PlayerManager(cfg, self.history, "http://127.0.0.1:%d" % port)
+        self.subtitles = SubtitleResolver(self.api, cfg.get("opensubtitles_api_key"))
+        # Autoplay-advanced episodes reuse already-cached subtitles (sync).
+        self.player.sub_cache_lookup = self.subtitles.cached
         self.setup_error = None  # populated by preflight if rclone is unusable
         self._refresh_task = None
         self._pending_scope = set()  # scopes requested while a scan was running
@@ -107,6 +111,7 @@ class AppState:
         await self.api.aclose()
         await self.streamer.aclose()
         await self.tmdb.aclose()
+        await self.subtitles.aclose()
 
 
 def _drive_error_response(e):
@@ -265,6 +270,7 @@ def create_app(cfg=None):
             "drive_sections": state.cfg.get("drive_sections", {}),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
+            "subtitles": bool(state.cfg.get("subtitles", True)),
             "player": state.cfg.get("player", "auto"),
             "available_players": available,
         }
@@ -305,6 +311,8 @@ def create_app(cfg=None):
             state.cfg["auto_refresh_on_startup"] = bool(body.get("auto_refresh_on_startup"))
         if "autoplay_next" in body:
             state.cfg["autoplay_next"] = bool(body.get("autoplay_next"))
+        if "subtitles" in body:
+            state.cfg["subtitles"] = bool(body.get("subtitles"))
         if "player" in body:
             choice = str(body.get("player") or "auto")
             if choice in ("auto", "mpv", "iina", "vlc"):
@@ -321,6 +329,7 @@ def create_app(cfg=None):
             "drive_sections": state.cfg.get("drive_sections", {}),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
+            "subtitles": bool(state.cfg.get("subtitles", True)),
             "refresh_started": started,
         }
 
@@ -379,12 +388,24 @@ def create_app(cfg=None):
             # Clear the saved resume position so the player starts at 0.
             state.history.update(file_id, name=name, drive_id=drive_id,
                                  parent_id=parent_id, position=0.0, force=True)
+        # English subtitles (cached / sibling .srt / OpenSubtitles) — bounded
+        # so a slow lookup can only delay playback, never block it.
+        sub_path = None
+        if state.cfg.get("subtitles", True) and media != "audio":
+            try:
+                sub_path = await asyncio.wait_for(
+                    state.subtitles.resolve(file_id, name, drive_id, parent_id),
+                    timeout=10.0)
+            except Exception:
+                sub_path = None
         try:
             result = state.player.play(
                 file_id, name, duration_ms=duration_ms,
                 drive_id=drive_id, parent_id=parent_id, queue=queue,
                 media="audio" if media == "audio" else None,
+                sub_path=sub_path,
             )
+            result["subtitles"] = bool(sub_path)
             return result
         except PlayerError as e:
             return JSONResponse({"error": "no_player", "message": str(e)}, status_code=501)

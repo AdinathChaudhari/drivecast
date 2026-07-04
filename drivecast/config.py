@@ -19,6 +19,7 @@ CONFIG_PATH = os.path.join(USER_DIR, "config.json")
 EXAMPLE_PATH = os.path.join(REPO_ROOT, "config.example.json")
 DATA_DIR = os.path.join(USER_DIR, "data")
 POSTERS_DIR = os.path.join(DATA_DIR, "posters")
+SUBS_DIR = os.path.join(DATA_DIR, "subs")
 SECRETS_PATH = os.path.join(USER_DIR, "secrets", "secrets.json")
 
 # Secret settings: resolved from env vars / secrets/secrets.json, NEVER written
@@ -27,12 +28,17 @@ SECRETS_PATH = os.path.join(USER_DIR, "secrets", "secrets.json")
 SECRET_KEYS = {
     # config key : environment-variable override
     "tmdb_api_key": "DRIVECAST_TMDB_API_KEY",
+    "opensubtitles_api_key": "DRIVECAST_OPENSUBTITLES_API_KEY",
 }
 
 DEFAULTS = {
     "remote": "gdrive1",
     "tmdb_api_key": "",
+    "opensubtitles_api_key": "",
     "player": "auto",
+    # Load English subtitles when available (sibling .srt on the drive, or
+    # OpenSubtitles when an API key is configured in secrets).
+    "subtitles": True,
     "port": 8737,
     "page_size": 200,
     # Library upgrade:

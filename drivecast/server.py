@@ -301,7 +301,17 @@ def create_app(cfg=None):
     @app.get("/api/continue")
     async def api_continue():
         state = app.state.dc
-        return {"items": state.history.continue_watching()}
+        items = state.history.continue_watching()
+        # Enrich each item with its owning library title so the shelf can show
+        # the poster and a clean display name instead of the raw filename.
+        for item in items:
+            rec = state.library.title_for_file(item.get("file_id"))
+            if rec:
+                item["title"] = rec.get("title")
+                item["title_id"] = rec.get("id")
+                item["type"] = rec.get("type")
+                item["poster"] = rec.get("poster")
+        return {"items": items}
 
     @app.get("/api/watched-map")
     async def api_watched_map():

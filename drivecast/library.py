@@ -75,6 +75,7 @@ def _video_dict(f, parent_id, ancestors):
         "duration_ms": _duration_ms(f),
         "parent_id": parent_id,
         "ancestors": list(ancestors),
+        "thumb": f.get("thumbnailLink"),
     }
 
 
@@ -176,6 +177,8 @@ def _show_record(node):
         # Raw folder name kept transiently so the season-grouping pass can detect
         # "<Show> Season N" / bare "Season N" siblings. Stripped before persisting.
         "_folder_name": node["name"],
+        # First available Drive thumbnail; poster fallback when TMDB has none.
+        "_thumb": next((v.get("thumb") for v in videos if v.get("thumb")), None),
         "seasons": _group_episodes(videos, title),
     }
 
@@ -203,6 +206,7 @@ def _movie_record(node, video, from_folder):
         # that turns out to be a bare/prefixed season; stripped before persisting.
         "_folder_name": node["name"],
         "_video_name": video["name"],
+        "_thumb": video.get("thumb"),
     }
 
 
@@ -285,6 +289,7 @@ def classify_loose(drive_id, loose_files):
             "tmdb_id": None,
             "overview": None,
             "quality": naming.best_quality(f.get("name") or "" for f in files),
+            "_thumb": next((v.get("thumb") for v in vids if v.get("thumb")), None),
             "seasons": _group_episodes(vids, show_title),
         })
     for f in movies:
@@ -304,6 +309,7 @@ def classify_loose(drive_id, loose_files):
             "file_id": v["id"],
             "size": v["size"],
             "duration_ms": v["duration_ms"],
+            "_thumb": v.get("thumb"),
         })
     return records
 
@@ -401,11 +407,14 @@ def group_seasons(records, drive_names):
         g = groups[key]
         buckets = {}
         best_q, best_q_rank = None, 0
+        thumb = None
         for season_num, rec in g["members"]:
             buckets.setdefault(season_num, []).extend(_episodes_of(rec, season_num))
             r = naming.quality_rank(rec.get("quality"))
             if r > best_q_rank:
                 best_q, best_q_rank = rec.get("quality"), r
+            if thumb is None:
+                thumb = rec.get("_thumb")
         seasons = []
         for s in sorted(buckets):
             eps = buckets[s]
@@ -423,6 +432,7 @@ def group_seasons(records, drive_names):
             "tmdb_id": None,
             "overview": None,
             "quality": best_q,
+            "_thumb": thumb,
             "seasons": seasons,
         })
 
@@ -502,6 +512,7 @@ class Library:
         self._lock = threading.Lock()
         self.data = self._load()
         self._file_index = {}
+        self._file_title = {}
         self._rebuild_index()
 
     def _load(self):
@@ -529,8 +540,10 @@ class Library:
             raise
 
     def _rebuild_index(self):
-        """Map file_id -> {name,size,duration_ms} for fast play/HEAD lookups."""
+        """Map file_id -> {name,size,duration_ms} for fast play/HEAD lookups,
+        plus file_id -> title id so history items can find their title record."""
         idx = {}
+        owners = {}
         for rec in self.data["titles"].values():
             if rec.get("type") == "movie" and rec.get("file_id"):
                 idx[rec["file_id"]] = {
@@ -538,6 +551,7 @@ class Library:
                     "size": rec.get("size"),
                     "duration_ms": rec.get("duration_ms"),
                 }
+                owners[rec["file_id"]] = rec.get("id")
             elif rec.get("type") == "show":
                 for season in rec.get("seasons", []):
                     for ep in season.get("episodes", []):
@@ -547,7 +561,9 @@ class Library:
                                 "size": ep.get("size"),
                                 "duration_ms": ep.get("duration_ms"),
                             }
+                            owners[ep["file_id"]] = rec.get("id")
         self._file_index = idx
+        self._file_title = owners
 
     # ---- reads ----
 
@@ -571,6 +587,14 @@ class Library:
 
     def file_info(self, file_id):
         return self._file_index.get(file_id)
+
+    def title_for_file(self, file_id):
+        """Return the title record that owns a file_id (movie or episode)."""
+        tid = self._file_title.get(file_id)
+        if tid is None:
+            return None
+        with self._lock:
+            return self.data["titles"].get(tid)
 
     # ---- writes ----
 
@@ -714,6 +738,36 @@ class Scanner:
             except (TypeError, ValueError):
                 pass
 
+    async def _resolve_drive_thumb(self, rec):
+        """Fallback poster: cache the title's own Drive thumbnail locally.
+
+        Used when TMDB is disabled or found no match. thumbnailLink URLs are
+        short-lived, so the image is downloaded at scan time into POSTERS_DIR
+        under a stable key derived from the title id.
+        """
+        url = rec.get("_thumb")
+        if not url or rec.get("poster"):
+            return
+        key = "dthumb_%s.jpg" % hashlib.sha1(rec["id"].encode("utf-8")).hexdigest()[:16]
+        dest = os.path.join(config.POSTERS_DIR, key)
+        if not os.path.exists(dest):
+            try:
+                data = await self.api.fetch_thumbnail(url)
+            except Exception as e:  # pragma: no cover - defensive
+                log.debug("Thumbnail fetch failed for %r: %r", rec.get("title"), e)
+                return
+            if not data:
+                return
+            os.makedirs(config.POSTERS_DIR, exist_ok=True)
+            tmp = dest + ".tmp"
+            try:
+                with open(tmp, "wb") as f:
+                    f.write(data)
+                os.replace(tmp, dest)
+            except OSError:
+                return
+        rec["poster"] = key
+
     async def scan(self, selected_drives):
         """Full scan + diff + poster refresh + persist. Never raises."""
         self.status.update(running=True, scanned=0, total=len(selected_drives),
@@ -746,6 +800,13 @@ class Scanner:
                 for rec in new_titles.values():
                     if not rec.get("poster"):
                         await self._resolve_poster(rec)
+
+            # Titles TMDB couldn't cover fall back to the video's own Drive
+            # thumbnail (also the only poster source when TMDB is disabled).
+            for rec in new_titles.values():
+                await self._resolve_drive_thumb(rec)
+            for rec in new_titles.values():
+                rec.pop("_thumb", None)
 
             prune_removed_posters(old_titles, new_titles, removed)
             self.status["removed"] = len(removed)

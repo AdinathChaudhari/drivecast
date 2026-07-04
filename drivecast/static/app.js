@@ -107,14 +107,21 @@ function continueCard(item) {
   const card = document.createElement("div");
   card.className = "card video";
   const pct = Math.max(2, Math.min(98, item.percent || 0));
+  const label = item.title || item.name;
+  const progress = `<div class="progress"><span style="width:${pct}%"></span></div>`;
+  const ph = `<div class="ph-title">${escapeHTML(label)}</div>` +
+    `<div class="ph-year">${fmtTime(item.position)} watched</div>`;
+  let cls = " placeholder", inner = ph;
+  if (item.poster) {
+    cls = "";
+    inner = `<img loading="lazy" src="/api/poster/${encodeURIComponent(item.poster)}" alt=""
+      onerror="this.parentElement.classList.add('placeholder');this.remove();
+               this.parentElement.insertAdjacentHTML('afterbegin', this.dataset.ph||'')" data-ph='${escapeHTML(ph)}'>`;
+  }
   card.innerHTML = `
-    <div class="poster placeholder">
-      <div class="ph-title">${escapeHTML(item.name)}</div>
-      <div class="ph-year">${fmtTime(item.position)} watched</div>
-      <div class="progress"><span style="width:${pct}%"></span></div>
-    </div>
-    <div class="label">${escapeHTML(item.name)}</div>
-    <div class="sub">${Math.round(item.percent)}%</div>`;
+    <div class="poster${cls}">${inner}${progress}</div>
+    <div class="label">${escapeHTML(label)}</div>
+    <div class="sub">${Math.round(item.percent)}% · ${fmtTime(item.position)} watched</div>`;
   card.addEventListener("click", () =>
     playFile({ id: item.file_id, name: item.name, drive_id: item.drive_id, parent_id: item.parent_id },
              item.duration ? item.duration * 1000 : null, true));

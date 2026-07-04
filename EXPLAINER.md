@@ -272,7 +272,12 @@ keeps that value across refreshes (carried over like poster metadata), so the
 **Refresh diffing.** A refresh rescans and diffs against the existing library:
 newly-found titles are added, titles whose files are gone are removed (and their
 now-orphaned posters deleted), and show episode lists are updated in place. A
-`/api/refresh/status` endpoint drives the progress bar.
+`/api/refresh/status` endpoint drives the progress bar. The *scan* itself is
+always complete — every selected drive is walked every time, and the diff only
+determines what changed afterwards. A per-drive (or otherwise incremental)
+refresh doesn't exist yet; it's a natural future optimisation since
+`Scanner.scan()` already takes a list of drive ids, but today the result would
+replace the whole library, so it must always be fed the full selection.
 
 **Posters, pre-cached.** During the scan, every title that doesn't already have a
 poster is resolved against **TMDB** (movie vs TV, by title+year, if you set an API
@@ -280,8 +285,14 @@ key), its w342 poster is downloaded to the posters cache, and the local path is
 stored in the record — so tiles load instantly from disk with no per-card lookup.
 Because the scan backfills *every* poster-less title (not just newly-added ones),
 adding a TMDB key and hitting Refresh fills in your whole existing library.
-Negative results are cached too. No key or no match → a clean **gradient
-placeholder** with the title and year. TMDB is purely additive.
+Negative results are cached too. When TMDB has no answer (no key, or no match —
+home videos, obscure releases), the scan falls back to the file's own **Google
+Drive thumbnail**: Drive generates one for most videos and hands out a
+short-lived URL with each file listing, so drivecast downloads it during the
+scan (bumping Drive's default tiny size up to poster size) into the same
+posters cache under a stable `dthumb_*` key. Only a title with neither source
+gets the clean **gradient placeholder** with the title and year. TMDB is purely
+additive.
 
 **Search** is now instant and offline: the home search box filters the cached
 library client-side. The old server-side `corpora=allDrives` search (one query
@@ -391,16 +402,20 @@ couple of seconds. Click the result to play.
 **Continue Watching** works on **mpv**, **IINA** *and* **VLC** — each lets
 drivecast peek at your current position every few seconds (mpv/IINA over their
 control socket, VLC over its HTTP interface), so partly-watched titles reappear
-on the resume shelf and pick up where you left off. mpv stays the recommended
+on the resume shelf and pick up where you left off. The shelf looks up each
+in-progress file in the cached library, so the card shows the movie's (or, for
+an episode, the show's) poster with a progress bar across the bottom and the
+clean title — not the raw release filename. mpv stays the recommended
 default (it needs no extra interface); on the rare VLC where the HTTP interface
 can't start, playback still works, just without the resume shelf for that
 session — which is the only reason the app still suggests `brew install mpv`.
 
-**Posters.** Out of the box you'll see tidy placeholder cards (title + year on a
-gradient). If you drop a free **TMDB API key** into `secrets/secrets.json` (see
-the README), the cards turn into real movie and show posters — fetched once and
-cached, so it's fast forever after. This is purely cosmetic; the app works
-identically without it.
+**Posters.** Out of the box most tiles get artwork from the file's own **Google
+Drive thumbnail** (cached during the scan); anything Drive has no thumbnail for
+shows a tidy placeholder card (title + year on a gradient). If you drop a free
+**TMDB API key** into `secrets/secrets.json` (see the README), the cards turn
+into real movie and show posters — fetched once and cached, so it's fast forever
+after. This is purely cosmetic; the app works identically without it.
 
 That's it. There's no library to import, no scan to wait for, nothing syncs. You
 run one command and your entire cloud collection is right there to play.

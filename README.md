@@ -12,8 +12,11 @@ catalogue to `library.json`. From then on, normal browsing is instant and
 hits the Google API **zero times** — tiles, seasons, episodes and posters all
 come off disk. A **Refresh** (manual or on launch) rescans and diffs: new titles
 are added (and their posters fetched), deleted titles are removed (and their
-orphaned posters pruned), and show episode lists are updated. The raw
-folder-browser is still available behind a demoted **Browse files** link.
+orphaned posters pruned), and show episode lists are updated. A refresh is
+always a **complete** rescan — it walks every selected drive and rebuilds the
+whole catalogue (there is no per-drive / incremental refresh yet; the diffing
+only decides what changed, not what gets scanned). The raw folder-browser is
+still available behind a demoted **Browse files** link.
 
 **Collection folders.** The scan recurses *into* folder trees, so a collection
 folder (`Phase 1`, `Hollywood`, `Blade Series`, `The Godfather Series`, …) that
@@ -112,8 +115,9 @@ byte-ranges); all three now report your position back for resume.
 Get a free API key from https://www.themoviedb.org/settings/api and put it in
 **`~/Library/Application Support/drivecast/secrets/secrets.json`** (see
 [Secrets & security](#secrets--security)) as `{"tmdb_api_key": "…"}`. Without a
-key, drivecast shows clean gradient placeholder cards (parsed title + year)
-instead of posters.
+key (or when TMDB has no match), the scan falls back to the video file's own
+**Google Drive thumbnail**; only titles with neither show a clean gradient
+placeholder card (parsed title + year).
 
 ## Run
 
@@ -230,15 +234,20 @@ Once `app.py` is running and the library opens in your browser:
 7. **Continue Watching.** With **mpv**, **IINA** *or* **VLC**, drivecast tracks
    your position automatically (VLC via its HTTP interface), so partly-watched
    titles (including the right *episode* of a show) reappear on the home shelf and
-   resume where you left off. mpv stays the recommended default; if VLC's HTTP
-   interface can't start, playback still works, just without resume tracking (and
-   without autoplay, which needs the position to know the episode finished).
+   resume where you left off. Each shelf card shows the title's **poster** (with
+   the progress bar overlaid) and the clean library title — an in-progress episode
+   shows its show's poster and name rather than the raw filename. Files played
+   outside the library (via **Browse files**) keep the gradient placeholder. mpv
+   stays the recommended default; if VLC's HTTP interface can't start, playback
+   still works, just without resume tracking (and without autoplay, which needs
+   the position to know the episode finished).
 8. **Refresh.** When you add or remove content on the drives, click **Refresh**
    (top bar) or the menu-bar **Refresh library** item. drivecast rescans, adds
    new titles, removes deleted ones, updates show episode lists, and backfills
    posters for any title still missing one (so enabling a TMDB key and hitting
    Refresh gives every existing tile a poster) — all without disturbing what
-   you're watching.
+   you're watching. Note a refresh always rescans **all** selected drives — you
+   can't refresh a single drive on its own yet.
 9. **Browse raw files (advanced).** The **Browse files** link still gives you the
    old live folder-by-folder browser over any drive, if you ever need it.
 
@@ -247,8 +256,12 @@ Once `app.py` is running and the library opens in your browser:
 Posters are **pre-cached during the scan**: for each title without one drivecast
 resolves TMDB (movie vs TV, by title + year), downloads the w342 poster to the
 posters cache, and stores its path in the library record — so tiles load
-instantly from disk with no per-card lookup. Without a key (or when there's no
-match) a tile falls back to a clean gradient placeholder with the title and year.
+instantly from disk with no per-card lookup. When TMDB has no match (or no key
+is set), the scan falls back to the video file's own **Google Drive thumbnail**:
+it's downloaded once into the same posters cache (Drive thumbnail URLs expire
+within hours, so they're fetched at scan time, at a bumped-up size) and used as
+the tile artwork. Only a title with neither a TMDB poster nor a Drive thumbnail
+shows the gradient placeholder with the title and year.
 
 To enable posters:
 
@@ -326,7 +339,8 @@ rebuilds):
   episodes, poster paths); rebuilt by a scan/refresh
 - `history.json` — resume positions & watched state, keyed by Drive file id
 - `tmdb_cache.json` — cached TMDB lookups (including negative results)
-- `posters/` — downloaded w342 posters
+- `posters/` — downloaded artwork: TMDB w342 posters, plus `dthumb_*.jpg`
+  Google Drive thumbnails cached as fallbacks
 
 ## Notes
 

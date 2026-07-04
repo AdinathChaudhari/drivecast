@@ -5,6 +5,7 @@ supportsAllDrives=true / includeItemsFromAllDrives=true so Shared Drives work.
 """
 import asyncio
 import logging
+import re
 import time
 
 import httpx
@@ -198,6 +199,26 @@ class DriveAPI:
         files = [f for f in data.get("files", []) if f.get("mimeType", "").startswith("video/")]
         self._cache_metas(files)
         return {"files": files, "nextPageToken": data.get("nextPageToken")}
+
+    # ---- thumbnails ----
+
+    async def fetch_thumbnail(self, url):
+        """Download a file's thumbnailLink image; returns bytes or None.
+
+        Drive hands out small (=s220) thumbnails by default — bump the size
+        parameter so the image survives being displayed as a poster. Falls
+        back to the original URL if the resized variant fails.
+        """
+        bumped = re.sub(r"=s\d+[^&]*$", "=s640", url)
+        try:
+            headers = await self._auth_headers()
+            for u in ([bumped, url] if bumped != url else [url]):
+                resp = await self._client.get(u, headers=headers, follow_redirects=True)
+                if resp.status_code == 200:
+                    return resp.content
+        except httpx.HTTPError:
+            pass
+        return None
 
     # ---- metadata ----
 

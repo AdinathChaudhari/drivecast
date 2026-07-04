@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from drivecast import config as config_mod
+from drivecast import history as history_mod
 from drivecast import library as library_mod
 from drivecast import server as server_mod
 from drivecast.drive_api import DriveAPI
@@ -29,7 +30,7 @@ SYNTHETIC = {
         },
         "showB": {
             "id": "showB", "type": "show", "title": "The Bear", "year": 2022,
-            "drive_id": "drv1", "folder_id": "showB", "poster": None,
+            "drive_id": "drv1", "folder_id": "showB", "poster": "bear.jpg",
             "tmdb_id": None, "overview": "kitchen",
             "seasons": [{"season": 1, "episodes": [
                 {"title": "System", "episode": 1, "file_id": "fileE1",
@@ -49,6 +50,10 @@ def client(tmp_path, monkeypatch):
 
     # Point the server's Library/Scanner at the temp file.
     monkeypatch.setattr(server_mod, "Library", lambda: library_mod.Library(path=str(lib_path)))
+
+    # Keep watch history in the temp dir too — never touch the user's real data.
+    monkeypatch.setattr(server_mod, "History",
+                        lambda: history_mod.History(path=str(tmp_path / "history.json")))
 
     # No rclone / no Drive network anywhere.
     async def _fake_token(self):
@@ -195,6 +200,33 @@ def test_settings_roundtrips_autoplay_next(client):
     assert r.status_code == 200
     assert r.json()["autoplay_next"] is False
     assert client.get("/api/settings").json()["autoplay_next"] is False
+
+
+def test_continue_enriched_with_library_title(client):
+    # A partially-watched episode surfaces on the Continue shelf carrying the
+    # owning show's title/poster so the UI can render a thumbnail.
+    client.app.state.dc.history.update("fileE1", name="The.Bear.S01E01.mkv",
+                                       position=600.0, duration=1500.0, force=True)
+    r = client.get("/api/continue")
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1
+    it = items[0]
+    assert it["file_id"] == "fileE1"
+    assert it["title"] == "The Bear"
+    assert it["title_id"] == "showB"
+    assert it["type"] == "show"
+    assert it["poster"] == "bear.jpg"
+
+
+def test_continue_unknown_file_passes_through(client):
+    # Files played outside the library (e.g. via Browse) stay unenriched.
+    client.app.state.dc.history.update("strayFile", name="stray.mkv",
+                                       position=100.0, duration=1000.0, force=True)
+    items = client.get("/api/continue").json()["items"]
+    it = next(x for x in items if x["file_id"] == "strayFile")
+    assert it["name"] == "stray.mkv"
+    assert "poster" not in it and "title" not in it
 
 
 def test_refresh_status_shape(client):

@@ -24,10 +24,12 @@ def node(name, videos, subfolders=(), fid="folder1", drive="drv1"):
             "videos": list(videos), "subfolders": list(subfolders)}
 
 
-def rawfile(fid, name, mime="video/mp4", size=1000, dur=None):
+def rawfile(fid, name, mime="video/mp4", size=1000, dur=None, thumb=None):
     f = {"id": fid, "name": name, "mimeType": mime, "size": str(size)}
     if dur is not None:
         f["videoMediaMetadata"] = {"durationMillis": str(dur)}
+    if thumb is not None:
+        f["thumbnailLink"] = thumb
     return f
 
 
@@ -406,6 +408,94 @@ def test_scan_survives_folder_rate_limit(tmp_path):
     titles = [t["title"] for t in lib.titles_list()]
     assert "Arrival" in titles
     assert status["error"] is not None  # recorded the skipped folder
+
+
+# --------------------------------------------- drive thumbnail fallback --------
+
+class _ThumbScanAPI(_FakeScanAPI):
+    """Fake scan API that also serves thumbnail bytes and records fetches."""
+
+    def __init__(self, tree):
+        super().__init__(tree)
+        self.thumb_fetches = []
+
+    async def fetch_thumbnail(self, url):
+        self.thumb_fetches.append(url)
+        return b"jpeg-bytes"
+
+
+class _FakeTMDB:
+    """Enabled TMDB stub that always resolves a poster."""
+    enabled = True
+
+    async def enrich(self, title, year=None, media_type="movie"):
+        return {"tmdb_id": 1, "title": title, "year": year,
+                "poster_key": "tmdb.jpg", "overview": "o"}
+
+
+def _thumb_tree():
+    return {
+        "drv1": [rawfolder("movieF", "Arrival (2016)")],
+        "movieF": [rawfile("mv", "Arrival.2016.mkv", size=10,
+                           thumb="https://lh3.example/thumb=s220")],
+    }
+
+
+def test_scan_falls_back_to_drive_thumbnail(tmp_path, monkeypatch):
+    # TMDB disabled: the poster comes from the video's own Drive thumbnail,
+    # downloaded into POSTERS_DIR under a stable dthumb_* key.
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    api = _ThumbScanAPI(_thumb_tree())
+    scanner = library.Scanner(api, _DisabledTMDB(), lib, throttle=0)
+    asyncio.run(scanner.scan(["drv1"]))
+    rec = lib.titles_list()[0]
+    assert rec["poster"] and rec["poster"].startswith("dthumb_")
+    assert os.path.exists(os.path.join(config.POSTERS_DIR, rec["poster"]))
+    assert "_thumb" not in rec          # transient key never persisted
+    assert api.thumb_fetches            # thumbnail actually fetched
+
+
+def test_scan_prefers_tmdb_poster_over_drive_thumbnail(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    api = _ThumbScanAPI(_thumb_tree())
+    scanner = library.Scanner(api, _FakeTMDB(), lib, throttle=0)
+    asyncio.run(scanner.scan(["drv1"]))
+    rec = lib.titles_list()[0]
+    assert rec["poster"] == "tmdb.jpg"
+    assert api.thumb_fetches == []      # fallback never triggered
+
+
+def test_scan_thumbnail_failure_leaves_poster_none(tmp_path, monkeypatch):
+    class _NoThumbAPI(_ThumbScanAPI):
+        async def fetch_thumbnail(self, url):
+            return None
+
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_NoThumbAPI(_thumb_tree()), _DisabledTMDB(), lib, throttle=0)
+    status = asyncio.run(scanner.scan(["drv1"]))
+    assert status["error"] is None
+    rec = lib.titles_list()[0]
+    assert rec["poster"] is None
+    assert "_thumb" not in rec
+
+
+def test_title_for_file_maps_movies_and_episodes(tmp_path):
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    lib.replace({
+        "movieA": {"id": "movieA", "type": "movie", "title": "Arrival",
+                   "file_id": "fA", "size": 1, "duration_ms": None},
+        "showB": {"id": "showB", "type": "show", "title": "The Bear",
+                  "seasons": [{"season": 1, "episodes": [
+                      {"title": "System", "episode": 1, "file_id": "fE1",
+                       "name": "e1.mkv", "duration_ms": None, "size": 1,
+                       "parent_id": "s1"}]}]},
+    })
+    assert lib.title_for_file("fA")["id"] == "movieA"
+    assert lib.title_for_file("fE1")["id"] == "showB"
+    assert lib.title_for_file("nope") is None
 
 
 # ------------------------------------------------- season grouping (v2) --------

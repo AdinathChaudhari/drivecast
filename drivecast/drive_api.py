@@ -210,14 +210,16 @@ class DriveAPI:
         back to the original URL if the resized variant fails.
         """
         bumped = re.sub(r"=s\d+[^&]*$", "=s640", url)
-        try:
-            headers = await self._auth_headers()
-            for u in ([bumped, url] if bumped != url else [url]):
+        headers = await self._auth_headers()
+        # Guard each attempt separately: a timeout on the resized variant must
+        # not abort the fallback to the original URL.
+        for u in ([bumped, url] if bumped != url else [url]):
+            try:
                 resp = await self._client.get(u, headers=headers, follow_redirects=True)
                 if resp.status_code == 200:
                     return resp.content
-        except httpx.HTTPError:
-            pass
+            except httpx.HTTPError:
+                continue
         return None
 
     # ---- metadata ----

@@ -74,8 +74,8 @@ function posterMarkup(rec) {
     (rec.year ? `<div class="ph-year">${rec.year}</div>` : "");
   if (rec.poster) {
     return { cls: "", html: `<img loading="lazy" src="/api/poster/${encodeURIComponent(rec.poster)}" alt=""
-      onerror="this.parentElement.classList.add('placeholder');this.remove();
-               this.parentElement.insertAdjacentHTML('beforeend', this.dataset.ph||'')" data-ph='${escapeHTML(ph)}'>` };
+      onerror="this.parentElement.classList.add('placeholder');
+               this.parentElement.insertAdjacentHTML('beforeend', this.dataset.ph||'');this.remove()" data-ph='${escapeHTML(ph)}'>` };
   }
   return { cls: " placeholder", html: ph };
 }
@@ -115,8 +115,8 @@ function continueCard(item) {
   if (item.poster) {
     cls = "";
     inner = `<img loading="lazy" src="/api/poster/${encodeURIComponent(item.poster)}" alt=""
-      onerror="this.parentElement.classList.add('placeholder');this.remove();
-               this.parentElement.insertAdjacentHTML('afterbegin', this.dataset.ph||'')" data-ph='${escapeHTML(ph)}'>`;
+      onerror="this.parentElement.classList.add('placeholder');
+               this.parentElement.insertAdjacentHTML('afterbegin', this.dataset.ph||'');this.remove()" data-ph='${escapeHTML(ph)}'>`;
   }
   card.innerHTML = `
     <div class="poster${cls}">${inner}${progress}</div>
@@ -618,8 +618,8 @@ function browseVideoCard(f) {
     cls = "";
     const u = `/api/poster/_?thumb=${encodeURIComponent(f.thumbnailLink)}`;
     inner = `<img loading="lazy" src="${u}" alt="" data-ph='${escapeHTML(ph)}'
-      onerror="this.parentElement.classList.add('placeholder');this.remove();
-               this.parentElement.insertAdjacentHTML('beforeend', this.dataset.ph||'')">`;
+      onerror="this.parentElement.classList.add('placeholder');
+               this.parentElement.insertAdjacentHTML('beforeend', this.dataset.ph||'');this.remove()">`;
   } else {
     inner = ph;
   }

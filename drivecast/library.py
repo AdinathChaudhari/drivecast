@@ -729,7 +729,10 @@ class Scanner:
             return
         if not meta:
             return
-        rec["poster"] = meta.get("poster_key")
+        # Only overwrite the poster when TMDB actually has artwork, so a match
+        # without a poster image doesn't wipe an existing dthumb_ fallback.
+        if meta.get("poster_key"):
+            rec["poster"] = meta.get("poster_key")
         rec["tmdb_id"] = meta.get("tmdb_id")
         rec["overview"] = meta.get("overview")
         if meta.get("year") and not rec.get("year"):
@@ -746,7 +749,13 @@ class Scanner:
         under a stable key derived from the title id.
         """
         url = rec.get("_thumb")
-        if not url or rec.get("poster"):
+        if not url:
+            return
+        poster = rec.get("poster")
+        # Keep a real (TMDB) poster, or a fallback whose cached file still
+        # exists; a dthumb_ key whose file went missing gets re-downloaded.
+        if poster and (not poster.startswith("dthumb_")
+                       or os.path.exists(os.path.join(config.POSTERS_DIR, poster))):
             return
         key = "dthumb_%s.jpg" % hashlib.sha1(rec["id"].encode("utf-8")).hexdigest()[:16]
         dest = os.path.join(config.POSTERS_DIR, key)
@@ -798,8 +807,18 @@ class Scanner:
             # configured; titles that already have a poster are skipped.
             if self.tmdb.enabled:
                 for rec in new_titles.values():
-                    if not rec.get("poster"):
+                    poster = rec.get("poster") or ""
+                    # dthumb_ fallbacks stay upgradeable: retry TMDB until it
+                    # matches, so enabling a key later still fills real posters.
+                    if not poster or poster.startswith("dthumb_"):
                         await self._resolve_poster(rec)
+                        new_poster = rec.get("poster")
+                        if (poster.startswith("dthumb_") and new_poster
+                                and new_poster != poster):
+                            try:
+                                os.remove(os.path.join(config.POSTERS_DIR, poster))
+                            except OSError:
+                                pass
 
             # Titles TMDB couldn't cover fall back to the video's own Drive
             # thumbnail (also the only poster source when TMDB is disabled).

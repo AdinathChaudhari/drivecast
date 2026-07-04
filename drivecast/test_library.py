@@ -482,6 +482,88 @@ def test_scan_thumbnail_failure_leaves_poster_none(tmp_path, monkeypatch):
     assert "_thumb" not in rec
 
 
+def test_rescan_upgrades_dthumb_to_tmdb_poster(tmp_path, monkeypatch):
+    # First scan without TMDB leaves a dthumb fallback; enabling TMDB and
+    # rescanning must upgrade to the real poster (and delete the old file).
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _DisabledTMDB(),
+                                lib, throttle=0).scan(["drv1"]))
+    rec = lib.titles_list()[0]
+    old_file = os.path.join(config.POSTERS_DIR, rec["poster"])
+    assert rec["poster"].startswith("dthumb_") and os.path.exists(old_file)
+
+    asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _FakeTMDB(),
+                                lib, throttle=0).scan(["drv1"]))
+    rec = lib.titles_list()[0]
+    assert rec["poster"] == "tmdb.jpg"
+    assert not os.path.exists(old_file)  # superseded fallback cleaned up
+
+
+def test_tmdb_match_without_artwork_keeps_dthumb(tmp_path, monkeypatch):
+    class _NoArtTMDB:
+        enabled = True
+
+        async def enrich(self, title, year=None, media_type="movie"):
+            return {"tmdb_id": 7, "title": title, "year": year,
+                    "poster_key": None, "overview": "o"}
+
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _DisabledTMDB(),
+                                lib, throttle=0).scan(["drv1"]))
+    dthumb = lib.titles_list()[0]["poster"]
+    assert dthumb.startswith("dthumb_")
+
+    asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _NoArtTMDB(),
+                                lib, throttle=0).scan(["drv1"]))
+    rec = lib.titles_list()[0]
+    assert rec["poster"] == dthumb          # fallback survives
+    assert rec["tmdb_id"] == 7              # metadata still enriched
+
+
+def test_rescan_restores_missing_dthumb_file(tmp_path, monkeypatch):
+    # If the cached fallback file is deleted, a rescan re-downloads it instead
+    # of leaving the record pointing at a 404ing key.
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _DisabledTMDB(),
+                                lib, throttle=0).scan(["drv1"]))
+    poster_file = os.path.join(config.POSTERS_DIR, lib.titles_list()[0]["poster"])
+    os.remove(poster_file)
+
+    api = _ThumbScanAPI(_thumb_tree())
+    asyncio.run(library.Scanner(api, _DisabledTMDB(), lib, throttle=0).scan(["drv1"]))
+    assert api.thumb_fetches                 # re-downloaded
+    assert os.path.exists(poster_file)
+
+
+def test_fetch_thumbnail_falls_back_when_bumped_request_raises():
+    import httpx
+
+    class _Img:
+        status_code = 200
+        content = b"img"
+
+    class _FlakyThumbClient:
+        def __init__(self):
+            self.calls = []
+
+        async def get(self, url, params=None, headers=None, follow_redirects=False):
+            self.calls.append(url)
+            if len(self.calls) == 1:
+                raise httpx.ReadTimeout("slow")   # bumped =s640 times out
+            return _Img()
+
+    api = DriveAPI(_FakeTokens(), lambda: [])
+    client = _FlakyThumbClient()
+    api._client = client
+    data = asyncio.run(api.fetch_thumbnail("https://lh3.example/abc=s220"))
+    assert data == b"img"
+    assert client.calls[0].endswith("=s640")     # tried the bumped size first
+    assert client.calls[1].endswith("=s220")     # then fell back to original
+
+
 def test_title_for_file_maps_movies_and_episodes(tmp_path):
     lib = library.Library(path=str(tmp_path / "library.json"))
     lib.replace({

@@ -172,8 +172,10 @@ class SubtitleResolver:
         elif parsed["year"]:
             params["year"] = str(parsed["year"])
         try:
+            # follow_redirects: the API 301s to a normalised query URL.
             resp = await self._client.get(OS_BASE + "/subtitles",
-                                          params=params, headers=self._os_headers())
+                                          params=params, headers=self._os_headers(),
+                                          follow_redirects=True)
             if resp.status_code != 200:
                 log.warning("OpenSubtitles search HTTP %s", resp.status_code)
                 return None
@@ -215,9 +217,21 @@ class SubtitleResolver:
             link = (resp.json() or {}).get("link")
             if not link:
                 return None
-            body = await self._client.get(link, follow_redirects=True)
-            if body.status_code == 200 and body.content:
-                return body.content
+            # The file host occasionally throws transient 5xx (Cloudflare 520);
+            # a couple of quick retries usually land it. Stays well inside the
+            # play-request's overall subtitle timeout.
+            for attempt in range(3):
+                if attempt:
+                    await asyncio.sleep(1.5)
+                body = await self._client.get(
+                    link, headers={"User-Agent": OS_USER_AGENT},
+                    follow_redirects=True)
+                if body.status_code == 200 and body.content:
+                    return body.content
+                if body.status_code < 500:
+                    break  # 4xx won't heal by retrying
+                log.info("OpenSubtitles file host HTTP %s (attempt %d)",
+                         body.status_code, attempt + 1)
         except (httpx.HTTPError, ValueError):
             pass
         return None

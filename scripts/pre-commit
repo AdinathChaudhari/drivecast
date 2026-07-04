@@ -20,7 +20,7 @@ done <<< "$staged"
 
 # 2) Scan staged CONTENT for secret VALUES (not mere mentions of the words, so
 #    docs and .gitignore patterns don't trip it). Each pattern needs a real value.
-patterns='(client_secret["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_-]{10,}|GOCSPX-[A-Za-z0-9_-]{10,}|refresh_token["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_./-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|tmdb_api_key["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][0-9a-f]{16,})'
+patterns='(client_secret["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_-]{10,}|GOCSPX-[A-Za-z0-9_-]{10,}|refresh_token["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_./-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|tmdb_api_key["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][0-9a-f]{16,}|(opensubtitles_api_key|remote_token)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,})'
 if git diff --cached -U0 | grep -E "^\+" | grep -Eq "$patterns"; then
   note "staged changes contain something that looks like a secret VALUE (key/token). Review the diff."
 fi

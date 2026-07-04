@@ -205,6 +205,33 @@ What plays where:
 Tap **Add to Home Screen** in Safari afterward and it opens full-screen like a
 real app, with no browser chrome.
 
+### How safe is this?
+
+Remote access is defended in layers; a stranger on the internet would need to
+break several independent things at once:
+
+1. **Reachability.** With the toggle off (the default), the server binds
+   `127.0.0.1` and is unreachable from any network, full stop. With it on, the
+   Tailscale address only routes for devices **signed into your own tailnet**
+   (`tailscale serve` runs in "tailnet only" mode) — to a stranger the
+   `…ts.net` name doesn't even resolve. The Wi-Fi address only exists on your
+   own network. Nothing is ever exposed to the public internet.
+2. **The token.** Every request from a non-local client must present the
+   secret token (128-bit, auto-generated). It's compared in constant time,
+   never written to logs (the access log is disabled precisely because tokens
+   travel in URLs), and after the first visit it lives in an `HttpOnly`
+   cookie. Without it, every endpoint — including streams — answers 401.
+3. **Blast radius.** drivecast is strictly read-only on Google Drive, so even
+   someone holding a valid link could only *watch* — never delete, modify or
+   upload. And playback on the Mac (`/api/play`) refuses non-local clients
+   outright.
+
+The QR / URL **is** the credential — treat it like a password. To revoke all
+access instantly (lost phone, shared a link by mistake): set
+`"remote_token": ""` in `~/Library/Application Support/drivecast/config.json`
+and restart — a fresh token is generated the next time you save Settings, and
+every old link, QR and cookie stops working immediately.
+
 ## Run
 
 ```sh

@@ -164,6 +164,40 @@ pre-loaded (toggle it in the player as usual). Autoplay-advanced episodes
 reuse cached subtitles. Turn the whole feature off with **Settings → English
 subtitles when available**.
 
+## Watch on your iPhone / iPad
+
+drivecast's web UI also works on a phone or tablet — same library, same
+Continue Watching, same posters — you just need to let the device reach your
+Mac. This is **off by default**.
+
+1. Turn on **Settings → Watch on iPhone / iPad**, then restart drivecast
+   (`Ctrl+C` and re-run `./venv/bin/python app.py`, or quit and relaunch the
+   menu-bar app) — enabling it changes which address the server binds to, so
+   it only takes effect on the next launch.
+2. Settings then shows a QR code and URL to scan, using either:
+   - **Tailscale (recommended)** — install it on your Mac and your phone/iPad
+     (`brew install` / App Store, on the same tailnet), then scan the QR.
+     Works from anywhere — home, a cafe, cellular — and the traffic is
+     encrypted end-to-end.
+   - **Same Wi-Fi** — no extra install; just scan the QR while your phone and
+     Mac are on the same network. Only works on that network.
+3. Scan the QR (or open the URL). The link carries a secret **token** —
+   treat it like a password: anyone with the link can stream your whole
+   library, so don't post the QR or URL anywhere public.
+
+What plays where:
+
+- **MP4 / M4V / MOV and audio files** play right in the phone's browser (an
+  inline video/audio player), with resume and **Continue Watching** kept in
+  sync with the Mac.
+- **MKV** (and anything else the browser can't play natively) hands off to
+  **VLC iOS** or **Infuse** via a button instead of playing inline. Resume /
+  Continue Watching is **not** tracked for files played this way — that only
+  works for drivecast's own web player.
+
+Tap **Add to Home Screen** in Safari afterward and it opens full-screen like a
+real app, with no browser chrome.
+
 ## Run
 
 ```sh
@@ -354,7 +388,10 @@ and is loaded at runtime:
   or history, and the bundled app can read your TMDB key. It all stays local and
   never reaches git. (`config.example.json` in the repo is only the first-run
   template.)
-- The web server binds to **`127.0.0.1` only** — never exposed on your network.
+- The web server binds to **`127.0.0.1`** by default; the opt-in remote-access
+  mode binds to your LAN/tailnet and requires a secret token on every
+  non-local request (see
+  [Watch on your iPhone / iPad](#watch-on-your-iphone--ipad)).
 - A **pre-commit hook** (`scripts/install-hooks.sh`) refuses to commit secret
   files or key-shaped strings as a backstop. Install it after cloning:
 
@@ -376,6 +413,8 @@ only — secrets go in `secrets/` (above).
 | `remote`       | `gdrive1` | rclone remote name (no trailing colon)              |
 | `player`       | `auto`    | `auto` \| `mpv` \| `iina` \| `vlc`                  |
 | `port`         | `8737`    | local port (bound to 127.0.0.1 only)                |
+| `remote_access` | `false`  | opt-in: expose the server on your LAN/tailnet (with a token) for phone/tablet viewing |
+| `remote_token` | `""`      | auto-generated secret required on every non-local request when `remote_access` is on |
 | `page_size`    | `200`     | Drive files.list page size                          |
 | `selected_drives` | `[]`   | Shared Drive ids included in the library            |
 | `drive_sections` | `{}`    | drive id → `entertainment`\|`courses`\|`podcasts`\|custom |
@@ -406,7 +445,9 @@ rebuilds):
 
 ## Notes
 
-- The server binds to `127.0.0.1` only — it is not exposed on your network.
+- The server binds to `127.0.0.1` by default; the opt-in remote-access mode
+  binds to your LAN/tailnet and requires a secret token on every non-local
+  request.
 - Operations are keyed by Drive **file id**, so filenames with quotes/unicode
   are handled safely.
 - Shared-drive queries always set `supportsAllDrives` / `includeItemsFromAllDrives`.

@@ -2,8 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f0f13">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="drivecast">
   <title>drivecast</title>
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -111,6 +117,24 @@
           <span id="settingsMsg" class="muted"></span>
         </div>
       </div>
+
+      <div class="settings-card" id="remoteCard">
+        <h3>Watch on iPhone / iPad</h3>
+        <p class="muted">Open drivecast in your phone or tablet's browser — on the same
+          Tailscale tailnet (recommended) or Wi-Fi network. Compatible files play in the
+          browser; MKV hands off to VLC or Infuse.</p>
+        <label class="toggle">
+          <input type="checkbox" id="remoteAccess">
+          <span>Enable remote access</span>
+        </label>
+        <div id="remoteDetails" class="remote-details hidden">
+          <div id="remoteUrls" class="remote-urls"></div>
+          <img id="remoteQr" class="remote-qr" src="" alt="QR code for this drivecast address">
+          <p class="muted">Scan with your phone. Restart drivecast after turning this on.
+            Tailscale recommended — see README.</p>
+          <p id="remoteRestartNote" class="remote-restart hidden">Restart drivecast to apply.</p>
+        </div>
+      </div>
     </div>
 
     <!-- ===================== Browse (advanced) view ===================== -->
@@ -144,6 +168,30 @@
         <button id="btnStartOver" class="btn">Start over</button>
         <button id="btnCancel" class="btn ghost">Cancel</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Web player (remote iPhone / iPad playback) -->
+  <div id="webPlayer" class="webplayer hidden">
+    <div class="wp-bar">
+      <span id="wpTitle" class="wp-title"></span>
+      <button id="wpClose" class="wp-close" aria-label="Close player">✕</button>
+    </div>
+    <video id="wpVideo" controls autoplay playsinline></video>
+  </div>
+
+  <!-- External-player chooser (MKV etc. on remote devices) -->
+  <div id="chooser" class="modal hidden">
+    <div class="modal-card">
+      <h3 id="chooserTitle"></h3>
+      <p class="muted">This file needs an external player to stream on iPhone / iPad.</p>
+      <div class="chooser-actions">
+        <a id="chooserVlc" class="btn primary" href="#">Open in VLC</a>
+        <a id="chooserInfuse" class="btn" href="#">Open in Infuse</a>
+        <button id="chooserBrowser" class="btn">Try in browser anyway</button>
+        <button id="chooserCancel" class="btn ghost">Cancel</button>
+      </div>
+      <p class="muted chooser-note">Resume isn't tracked in external apps.</p>
     </div>
   </div>
 

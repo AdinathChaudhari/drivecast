@@ -305,9 +305,11 @@ def _notify_already_running(url):
 
 def main():
     cfg = config_mod.load_config()
-    host = "127.0.0.1"
+    host = "0.0.0.0" if cfg.get("remote_access") else "127.0.0.1"
     port = int(cfg.get("port", 8737))
-    url = "http://%s:%d/" % (host, port)
+    # The browser URL is always loopback — "0.0.0.0" is a bind address, not
+    # a navigable host.
+    url = "http://127.0.0.1:%d/" % port
 
     # Another instance (or an old app.py) already owns the port: don't crash —
     # point the user at it and bow out.

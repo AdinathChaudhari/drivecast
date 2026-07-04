@@ -203,6 +203,45 @@ players with zero player-side setup. Autoplay-advanced episodes reuse whatever
 is already cached. **Settings → English subtitles when available** switches the
 whole thing off.
 
+### On your phone
+
+Everything above assumed the browser and drivecast live on the same machine —
+`127.0.0.1` talking to itself, which is exactly why the server never bothered
+asking anyone to log in. Put drivecast on your phone's Wi-Fi, or a shared
+Tailscale tailnet, and that assumption stops holding: a JSON API that can list
+your whole cloud library and stream any file is now reachable by something
+other than you. drivecast's answer is to stay locked down by default, and once
+you flip it open, to require a password.
+
+The trust boundary is just `127.0.0.1` (and its IPv6 twin `::1`) — "is this
+request the Mac talking to itself?" That question can't be faked: the address
+drivecast checks comes from the real TCP socket the operating system handed
+the server, never from a header a client could type in, so nothing arriving
+over the network can dress itself up as loopback. Turn on **Watch on iPhone /
+iPad** in Settings and drivecast starts listening on your LAN/tailnet address
+too — but now every request that *doesn't* come from loopback has to prove it
+knows a secret **token** (a random string generated the moment you flip the
+setting on) or it's turned away.
+
+Typing a token on every visit would be tedious, so the QR code and URLs on the
+Settings page bake it in as `?token=…` right there in the link — scan it once
+and that first page load hands your phone's browser a **cookie** that
+remembers you for six months, so after that you just reopen the bookmark or
+tap the home-screen icon. The token itself is compared with
+`hmac.compare_digest` rather than a plain `==`, so a network attacker can't
+guess it one character at a time by timing how fast the comparison fails.
+
+One asymmetry is deliberate: `/api/play` — the endpoint that launches
+mpv/VLC **on your Mac** — refuses any request that isn't from loopback, full
+stop. A phone must never be able to pop a video player open on your desktop
+from across the room. Instead, a remote browser gets its own path entirely:
+files the browser can play natively (MP4, M4V, MOV, audio) stream straight
+into an in-page `<video>`/`<audio>` element; everything else (chiefly MKV)
+hands off to VLC iOS or Infuse through a URL scheme — the phone opening its
+own app with its own copy of the stream URL and token. drivecast has no idea
+what happens after that handoff, which is also why resume tracking stops
+working for files played that way.
+
 ---
 
 ## 6. The library cache (and browsing, search, posters)

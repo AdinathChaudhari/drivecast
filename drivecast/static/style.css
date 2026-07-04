@@ -385,3 +385,74 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #d6d6dc; }
 .drive-row input, .toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
 .toggle { margin-top: 8px; }
 .settings-actions { margin-top: 22px; display: flex; align-items: center; gap: 14px; }
+
+/* ---- Watch on iPhone / iPad ---- */
+#remoteCard { margin-top: 20px; }
+.remote-details { margin-top: 16px; }
+.remote-urls { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.remote-url {
+  display: block; padding: 10px 12px; border-radius: 10px;
+  background: var(--panel-2); border: 1px solid rgba(255,255,255,0.08);
+  color: var(--accent); text-decoration: none; font-size: 13px; word-break: break-all;
+}
+.remote-url:hover { border-color: var(--accent); }
+.remote-url-label {
+  display: inline-block; margin-right: 8px; padding: 1px 8px; border-radius: 999px;
+  background: rgba(255,255,255,0.08); color: var(--muted);
+  font-size: 11px; font-weight: 600; letter-spacing: 0.3px;
+}
+.remote-qr {
+  display: block; width: 180px; height: 180px; padding: 10px;
+  background: #fff; border-radius: 12px;
+}
+.remote-restart { color: #ffd479; margin: 10px 0 0; }
+
+/* ---- web player (remote devices) ---- */
+.webplayer {
+  position: fixed; inset: 0; z-index: 70;
+  display: flex; flex-direction: column; background: #000;
+}
+.wp-bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; padding-top: max(12px, env(safe-area-inset-top));
+  background: linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0));
+}
+.wp-title {
+  flex: 1; min-width: 0; color: #fff; font-size: 15px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wp-close {
+  flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%;
+  border: none; background: rgba(255,255,255,0.14); color: #fff;
+  font-size: 16px; cursor: pointer;
+}
+.wp-close:hover { background: rgba(255,255,255,0.26); }
+#wpVideo { flex: 1; width: 100%; min-height: 0; background: #000; }
+
+/* ---- external-player chooser ---- */
+.chooser-actions { display: flex; flex-direction: column; gap: 10px; }
+.chooser-actions .btn { text-align: center; text-decoration: none; }
+.chooser-note { margin: 16px 0 0; }
+
+/* ---- responsive (phones / small tablets) ---- */
+@media (max-width: 720px) {
+  :root { --card-w: 110px; }
+  .topbar { flex-wrap: wrap; gap: 12px 16px; padding: 12px 16px; }
+  .searchwrap { order: 3; flex-basis: 100%; max-width: none; }
+  .topnav { margin-left: auto; }
+  main { padding: 16px 16px 48px; }
+  .scanbar, .banner { margin-left: 16px; margin-right: 16px; }
+  .section-tabs {
+    padding: 10px 16px 0; flex-wrap: nowrap; overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .section-tabs::-webkit-scrollbar { display: none; }
+  .section-tab { white-space: nowrap; }
+  .detail-hero { flex-direction: column; gap: 18px; }
+  .detail-poster { width: 150px; }
+  .detail-meta { min-width: 0; }
+  .detail-meta h1 { font-size: 22px; }
+  .episode { grid-template-columns: 30px 1fr auto 20px; gap: 8px; padding: 10px 12px; }
+  .settings-card { padding: 20px; }
+  .remote-qr { width: 160px; height: 160px; }
+}

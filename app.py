@@ -87,7 +87,7 @@ def main():
     except Exception:
         pass
     cfg = config_mod.load_config()
-    host = "127.0.0.1"
+    host = "0.0.0.0" if cfg.get("remote_access") else "127.0.0.1"
     port = int(cfg.get("port", 8737))
 
     if not _port_is_free(host, port):
@@ -99,12 +99,19 @@ def main():
     _preflight_rclone(cfg)
     _report_player(cfg)
 
-    url = "http://%s:%d/" % (host, port)
+    # The browser URL is always loopback — "0.0.0.0" is a bind address, not
+    # a navigable host.
+    url = "http://127.0.0.1:%d/" % port
+    if host != "127.0.0.1":
+        print("[drivecast] Remote access ON — also reachable on your network "
+              "(see Settings for the phone URL/QR).")
     print("[drivecast] Serving at %s" % url)
     _open_browser_later(url)
 
     app = create_app(cfg)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # access_log=False: request lines include ?token= query strings, and the
+    # remote-access token must never reach stdout/log files.
+    uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)
 
 
 if __name__ == "__main__":

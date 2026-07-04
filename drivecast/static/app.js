@@ -36,10 +36,19 @@ async function loadSections() {
   } catch (_) { /* fall back to the built-ins */ }
 }
 
+// On a phone/tablet the page is served over the LAN/tailnet (not loopback), so
+// playback stays in the browser / hands off to VLC/Infuse rather than launching
+// mpv on the Mac. remoteToken is fetched lazily from /api/remote (needed for the
+// external-player deep links; the same-origin <video> uses the cookie instead).
+const REMOTE_LOCAL_HOSTS = ["127.0.0.1", "localhost", "::1", "[::1]"];
+
 const state = {
   library: [],          // cached title records from /api/library
   byId: {},             // id -> record
   section: "entertainment", // active section tab
+  remote: !REMOTE_LOCAL_HOSTS.includes(location.hostname),
+  remoteToken: "",      // secret token for external-player stream URLs
+  remoteInfo: null,     // cached /api/remote payload (urls, port, token)
   filter: "all",        // all | movie | show | documentary | other
   sort: "title",        // title | year | added | watched
   group: "none",        // none | type | drive
@@ -136,6 +145,26 @@ function escapeHTML(s) {
 function isFolder(f) { return f.mimeType === "application/vnd.google-apps.folder"; }
 
 function show(el, on) { el.classList.toggle("hidden", !on); }
+
+// Extensions Safari/Chrome play inline in a <video>/<audio> element. Everything
+// else (MKV, AVI, …) is handed off to VLC iOS / Infuse on remote devices.
+const BROWSER_EXTS = [".mp4", ".m4v", ".mov", ".webm", ".mp3", ".m4a", ".m4b", ".aac", ".wav"];
+function canPlayInBrowser(name) {
+  const n = String(name || "").toLowerCase();
+  return BROWSER_EXTS.some((ext) => n.endsWith(ext));
+}
+
+// Load (once, or force-reload) the remote-access info: token + tappable URLs.
+// Failure-silent — off/loopback just leaves state.remoteToken empty.
+async function ensureRemoteInfo(force) {
+  if (state.remoteInfo && !force) return state.remoteInfo;
+  try {
+    const data = await api("/api/remote");
+    state.remoteToken = data.token || "";
+    state.remoteInfo = data;
+  } catch (_) { if (force) state.remoteInfo = null; }
+  return state.remoteInfo;
+}
 
 function showView(name) {
   show($("libraryView"), name === "library");
@@ -759,6 +788,11 @@ async function openSettings() {
   state.autoplayNext = settings.autoplay_next !== false;
   if ($("autoplayNext")) $("autoplayNext").checked = state.autoplayNext;
   if ($("subtitlesOn")) $("subtitlesOn").checked = settings.subtitles !== false;
+  if ($("remoteAccess")) {
+    $("remoteAccess").checked = !!settings.remote_access;
+    show($("remoteRestartNote"), false);
+    renderRemoteBlock();
+  }
   const sel = $("playerSelect");
   if (sel) {
     sel.value = settings.player || "auto";
@@ -808,6 +842,37 @@ async function openSettings() {
   }
 }
 
+// "Watch on iPhone / iPad" card: show tappable URLs + a QR of the best one.
+// URLs come from /api/remote; the QR is rendered server-side at /api/remote/qr.
+async function renderRemoteBlock() {
+  const on = $("remoteAccess") && $("remoteAccess").checked;
+  show($("remoteDetails"), !!on);
+  if (!on) return;
+  const info = await ensureRemoteInfo(true);
+  const urls = (info && info.urls) || [];
+  const list = $("remoteUrls");
+  list.innerHTML = "";
+  if (!urls.length) {
+    list.innerHTML = `<p class="muted">Save and restart drivecast — your address appears here once remote access is live.</p>`;
+  } else {
+    for (const u of urls) {
+      const a = document.createElement("a");
+      a.className = "remote-url";
+      a.href = u.url;
+      a.innerHTML = `<span class="remote-url-label">${escapeHTML(u.label)}</span>${escapeHTML(u.url)}`;
+      list.appendChild(a);
+    }
+  }
+  const qr = $("remoteQr");
+  if (urls.length) {
+    qr.onerror = () => show(qr, false);
+    qr.src = "/api/remote/qr?_=" + Date.now();
+    show(qr, true);
+  } else {
+    show(qr, false);
+  }
+}
+
 // Kick a refresh scoped to specific drives (per-drive refresh).
 async function refreshDrives(ids, displayName) {
   try {
@@ -844,6 +909,7 @@ async function saveSettings() {
       body: JSON.stringify({ selected_drives: selected, drive_sections: driveSections,
         auto_refresh_on_startup: auto, autoplay_next: autoplay,
         subtitles: $("subtitlesOn") ? $("subtitlesOn").checked : true,
+        remote_access: $("remoteAccess") ? $("remoteAccess").checked : false,
         player: ($("playerSelect") || {}).value || "auto" }),
     });
     $("settingsMsg").textContent = "Saved.";
@@ -851,6 +917,10 @@ async function saveSettings() {
     state.driveSections = res.drive_sections || {};
     state.autoplayNext = res.autoplay_next !== false;
     renderTabs();
+    // A remote_access flip only takes effect on the next launch.
+    if ($("remoteRestartNote")) show($("remoteRestartNote"), !!res.restart_required);
+    if (res.restart_required) toast("Restart drivecast to apply remote access.");
+    await renderRemoteBlock();
     if (res.refresh_started) { toast("Drives changed — refreshing library…"); startScanWatch(); }
   } catch (e) {
     $("settingsMsg").textContent = "Save failed: " + e.message;
@@ -878,16 +948,36 @@ async function playFile(f, durationMs, skipResumeCheck, queue, media) {
     } catch (_) {}
   }
   if (resumeAt > 5 && !skipResumeCheck) {
-    pendingPlay = { fileId, name, durMs, driveId, parentId, queue: q, media: med };
+    pendingPlay = { fileId, name, durMs, driveId, parentId, queue: q, media: med, resumeAt };
     $("modalBody").textContent =
       `You were at ${fmtTime(resumeAt)}. Resume or start from the beginning?`;
     show($("modal"), true);
     return;
   }
-  await launch(fileId, name, durMs, driveId, parentId, false, q, med);
+  await launch(fileId, name, durMs, driveId, parentId, false, q, med, resumeAt);
 }
 
-async function launch(fileId, name, durMs, driveId, parentId, startOver, queue, media) {
+async function launch(fileId, name, durMs, driveId, parentId, startOver, queue, media, resumeAt) {
+  // Remote devices never launch mpv on the Mac: play inline when the format is
+  // browser-friendly, otherwise offer the VLC/Infuse hand-off.
+  if (state.remote) {
+    let at = startOver ? 0 : (resumeAt || 0);
+    // Continue Watching / course-resume skip the modal (skipResumeCheck) so `at`
+    // is unset — locally the server resumes from history, so mirror that here.
+    if (!startOver && !at) {
+      try {
+        const cont = await api("/api/continue");
+        const hit = (cont.items || []).find((x) => x.file_id === fileId);
+        if (hit) at = hit.position || 0;
+      } catch (_) {}
+    }
+    if (canPlayInBrowser(name)) {
+      openWebPlayer({ fileId, name, resumeAt: at, queue: queue || [], media: media || null });
+    } else {
+      openChooser({ fileId, name, resumeAt: at, queue: queue || [], media: media || null });
+    }
+    return;
+  }
   try {
     const res = await api("/api/play", {
       method: "POST",
@@ -922,13 +1012,127 @@ function showVlcBanner() {
 
 $("btnResume").addEventListener("click", async () => {
   show($("modal"), false);
-  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, false, pendingPlay.queue, pendingPlay.media);
+  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, false, pendingPlay.queue, pendingPlay.media, pendingPlay.resumeAt);
 });
 $("btnStartOver").addEventListener("click", async () => {
   show($("modal"), false);
-  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, true, pendingPlay.queue, pendingPlay.media);
+  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, true, pendingPlay.queue, pendingPlay.media, pendingPlay.resumeAt);
 });
 $("btnCancel").addEventListener("click", () => { show($("modal"), false); pendingPlay = null; });
+
+// ==================== Web player (iPhone / iPad) ====================
+// Fullscreen inline <video> for remote devices. Reports position back to
+// /api/progress so Continue Watching / resume sync across devices, and carries
+// the autoplay queue client-side (the Mac never sees these files play).
+let wp = null; // active web-player session
+
+// Absolute stream URL WITH the token — for external players (VLC/Infuse) that
+// don't carry the browser's auth cookie.
+function absStreamUrl(fileId) {
+  return location.origin + "/stream/" + encodeURIComponent(fileId) +
+    "?token=" + encodeURIComponent(state.remoteToken || "");
+}
+
+function playInWebPlayer(fileId, name, resumeAt) {
+  const video = $("wpVideo");
+  $("wpTitle").textContent = name || "";
+  video.src = "/stream/" + encodeURIComponent(fileId); // same-origin: cookie auth
+  video.currentTime = 0;
+  video.load();
+  video.play().catch(() => {}); // autoplay may need a tap on iOS — controls cover it
+}
+
+function openWebPlayer({ fileId, name, resumeAt, queue, media }) {
+  stopProgressTimer();   // a rapid double-tap must not leak the old interval
+  wp = { fileId, name, media: media || null, queue: queue || [],
+         resumeAt: resumeAt || 0, duration: null, timer: null };
+  show($("webPlayer"), true);
+  playInWebPlayer(fileId, name, resumeAt || 0);
+}
+
+function stopProgressTimer() {
+  if (wp && wp.timer) { clearInterval(wp.timer); wp.timer = null; }
+}
+function startProgressTimer() {
+  stopProgressTimer();
+  if (wp) wp.timer = setInterval(() => reportProgress(false), 10000);
+}
+
+function reportProgress(ended) {
+  if (!wp) return;
+  const video = $("wpVideo");
+  const dur = (video.duration && isFinite(video.duration)) ? video.duration : (wp.duration || null);
+  const body = { file_id: wp.fileId, name: wp.name, position: video.currentTime || 0 };
+  if (dur) body.duration = dur;
+  if (ended) body.ended = true;
+  api("/api/progress", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }).catch(() => {});
+}
+
+function closeWebPlayer() {
+  stopProgressTimer();
+  if (wp) reportProgress(false); // save final position
+  const video = $("wpVideo");
+  video.pause();
+  video.removeAttribute("src");
+  video.load();
+  show($("webPlayer"), false);
+  wp = null;
+  setTimeout(loadContinue, 600);
+}
+
+function onWebPlayerEnded() {
+  stopProgressTimer();
+  reportProgress(true);
+  const next = (wp.queue || []).shift();
+  if (state.autoplayNext && next && next.file_id && canPlayInBrowser(next.name)) {
+    wp.fileId = next.file_id;
+    wp.name = next.name;
+    wp.media = next.media || null;
+    wp.resumeAt = 0;
+    wp.duration = null;
+    playInWebPlayer(next.file_id, next.name, 0);
+  } else {
+    closeWebPlayer();
+  }
+}
+
+(function initWebPlayer() {
+  const video = $("wpVideo");
+  video.addEventListener("loadedmetadata", () => {
+    if (video.duration && isFinite(video.duration)) wp && (wp.duration = video.duration);
+    if (wp && wp.resumeAt > 0 && wp.resumeAt < (video.duration || Infinity)) {
+      video.currentTime = wp.resumeAt;
+    }
+  });
+  video.addEventListener("play", startProgressTimer);
+  video.addEventListener("pause", () => { stopProgressTimer(); reportProgress(false); });
+  video.addEventListener("ended", onWebPlayerEnded);
+  $("wpClose").addEventListener("click", closeWebPlayer);
+})();
+
+// ---------- external-player chooser (MKV etc. on remote devices) ----------
+let chooserFile = null;
+
+function openChooser({ fileId, name, resumeAt, queue, media }) {
+  chooserFile = { fileId, name, resumeAt: resumeAt || 0,
+                  queue: queue || [], media: media || null };
+  const enc = encodeURIComponent(absStreamUrl(fileId));
+  $("chooserTitle").textContent = name || "";
+  $("chooserVlc").href = "vlc-x-callback://x-callback-url/stream?url=" + enc;
+  $("chooserInfuse").href = "infuse://x-callback-url/play?url=" + enc;
+  show($("chooser"), true);
+}
+
+$("chooserBrowser").addEventListener("click", () => {
+  show($("chooser"), false);
+  if (chooserFile) openWebPlayer({ fileId: chooserFile.fileId, name: chooserFile.name,
+    resumeAt: chooserFile.resumeAt, queue: chooserFile.queue, media: chooserFile.media });
+});
+$("chooserCancel").addEventListener("click", () => { show($("chooser"), false); chooserFile = null; });
 
 // ==================== Browse (advanced) ====================
 async function loadDrives() {
@@ -1118,6 +1322,7 @@ $("settingsBack").addEventListener("click", () => { location.hash = "#/"; });
 $("browseBack").addEventListener("click", () => { location.hash = "#/"; });
 $("refreshBtn").addEventListener("click", triggerRefresh);
 $("saveSettings").addEventListener("click", saveSettings);
+if ($("remoteAccess")) $("remoteAccess").addEventListener("change", renderRemoteBlock);
 
 $("filters").addEventListener("click", (e) => {
   const btn = e.target.closest(".chip");
@@ -1176,6 +1381,9 @@ async function loadPlaybackSettings() {
 (async function init() {
   await loadSections();
   restoreControls();
+  // On a remote device, load the token up front so the VLC/Infuse deep links
+  // (built synchronously when the chooser opens) already have it.
+  if (state.remote) await ensureRemoteInfo();
   await loadLibrary();
   await ensureWatchedMap();
   await loadPlaybackSettings();

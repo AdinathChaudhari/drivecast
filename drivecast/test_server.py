@@ -42,8 +42,10 @@ SYNTHETIC = {
 }
 
 
-@pytest.fixture
-def client(tmp_path, monkeypatch):
+def _install_stubs(tmp_path, monkeypatch):
+    """Point the server at a synthetic library and stub out rclone / Drive /
+    player / save_config so no test touches the network or the user's data.
+    Returns the dict the fake player records its call into."""
     # Write a synthetic library the server will load.
     lib_path = tmp_path / "library.json"
     lib_path.write_text(json.dumps(SYNTHETIC))
@@ -82,18 +84,50 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(DriveAPI, "_get", _no_network)
     monkeypatch.setattr(PlayerManager, "play", _fake_play)
     monkeypatch.setattr(config_mod, "save_config", lambda cfg: None)
+    return captured
 
+
+def _base_cfg(**overrides):
     cfg = dict(config_mod.DEFAULTS)
     cfg.update({"tmdb_api_key": "", "selected_drives": ["drv1"],
                 "auto_refresh_on_startup": False})
+    cfg.update(overrides)
+    return cfg
 
-    app = server_mod.create_app(cfg)
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    captured = _install_stubs(tmp_path, monkeypatch)
+    app = server_mod.create_app(_base_cfg())
     with TestClient(app) as c:
         # Keep the subtitle cache in the temp dir; Drive lookups already fail
         # loudly via the _no_network stub.
         c.app.state.dc.subtitles.subs_dir = str(tmp_path / "subs")
         c._captured = captured
         yield c
+
+
+@pytest.fixture
+def make_client(tmp_path, monkeypatch):
+    """Factory for TestClients with arbitrary cfg + a spoofed socket peer.
+
+    starlette's TestClient sets scope["client"] from its `client` kwarg (never
+    from headers), so this is the same socket-level seam the middleware trusts.
+    Returns a context manager yielding the client.
+    """
+    captured = _install_stubs(tmp_path, monkeypatch)
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _make(cfg_overrides=None, client_addr=("203.0.113.7", 51234)):
+        app = server_mod.create_app(_base_cfg(**(cfg_overrides or {})))
+        with TestClient(app, client=client_addr) as c:
+            c.app.state.dc.subtitles.subs_dir = str(tmp_path / "subs")
+            c._captured = captured
+            yield c
+
+    return _make
 
 
 def test_library_endpoint_serves_cache(client):
@@ -339,3 +373,191 @@ def test_settings_roundtrips_subtitles(client):
     assert client.get("/api/settings").json()["subtitles"] is True
     client.post("/api/settings", json={"subtitles": False})
     assert client.get("/api/settings").json()["subtitles"] is False
+
+
+# ==========================================================================
+# Remote access: config, auth middleware, /api/remote(/qr), /api/progress.
+# ==========================================================================
+
+def _disk(client):
+    """Read the on-disk history.json for the fixture's temp history file."""
+    with open(client.app.state.dc.history.path) as f:
+        return json.load(f)
+
+
+def test_config_defaults_include_remote_keys():
+    assert config_mod.DEFAULTS["remote_access"] is False
+    assert config_mod.DEFAULTS["remote_token"] == ""
+    # Non-secret, so both persist to config.json.
+    assert "remote_access" in config_mod.SAVED_KEYS
+    assert "remote_token" in config_mod.SAVED_KEYS
+
+
+# ---- /api/progress ----
+
+def test_progress_requires_file_id(client):
+    r = client.post("/api/progress", json={"position": 5.0})
+    assert r.status_code == 400
+    assert r.json()["error"] == "bad_request"
+
+
+def test_progress_updates_history_and_ended_forces_write(client):
+    hist = client.app.state.dc.history
+    # First report persists (the initial write is never debounced) and history
+    # computes percent from position/duration.
+    r = client.post("/api/progress", json={"file_id": "fileA", "name": "Arrival",
+                                            "position": 100.0, "duration": 1000.0})
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert _disk(client)["fileA"]["percent"] == 10.0
+    # A follow-up within the debounce window updates memory but not disk...
+    client.post("/api/progress", json={"file_id": "fileA", "position": 200.0,
+                                        "duration": 1000.0})
+    assert _disk(client)["fileA"]["position"] == 100.0
+    assert hist.get("fileA")["position"] == 200.0
+    # ...until ended=True forces the write straight through.
+    client.post("/api/progress", json={"file_id": "fileA", "position": 300.0,
+                                        "duration": 1000.0, "ended": True})
+    assert _disk(client)["fileA"]["position"] == 300.0
+
+
+def test_progress_ended_marks_watched(client):
+    client.post("/api/progress", json={"file_id": "fileA", "name": "Arrival",
+                                        "position": 950.0, "duration": 1000.0,
+                                        "ended": True})
+    assert client.app.state.dc.history.get("fileA")["watched"] is True
+
+
+# ---- auth middleware allow/deny matrix ----
+
+def test_middleware_local_passes_when_remote_disabled(client):
+    # The fixture client is the "testclient" socket peer -> always trusted.
+    assert client.get("/api/library").status_code == 200
+
+
+def test_middleware_remote_denied_when_disabled(make_client):
+    with make_client() as c:                 # remote_access False by default
+        r = c.get("/api/library")
+        assert r.status_code == 403
+        assert r.json() == {"error": "remote_disabled"}
+
+
+def test_middleware_remote_token_matrix(make_client):
+    with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
+        # No token -> 401 JSON.
+        r = c.get("/api/library")
+        assert r.status_code == 401
+        assert r.json()["error"] == "unauthorized"
+        # A one-character-off token fails (compared with hmac.compare_digest).
+        assert c.get("/api/library?token=sekrey").status_code == 401
+        # The exact token is authorized.
+        assert c.get("/api/library?token=sekret").status_code == 200
+
+
+def test_middleware_empty_config_token_never_authorizes(make_client):
+    with make_client({"remote_access": True, "remote_token": ""}) as c:
+        assert c.get("/api/library?token=").status_code == 401
+        assert c.get("/api/library?token=anything").status_code == 401
+
+
+def test_middleware_html_login_page_on_failure(make_client):
+    with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
+        r = c.get("/api/library", headers={"accept": "text/html"})
+        assert r.status_code == 401
+        assert "text/html" in r.headers["content-type"]
+        # A GET form re-requesting "/" with a `token` field.
+        assert 'name="token"' in r.text and 'action="/"' in r.text
+
+
+def test_middleware_query_token_bootstraps_cookie(make_client):
+    with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
+        r = c.get("/api/remote?token=sekret")
+        assert r.status_code == 200
+        set_cookie = r.headers.get("set-cookie", "").lower()
+        assert "dc_token" in set_cookie and "httponly" in set_cookie
+        # The planted cookie authorizes a later request that carries no ?token=.
+        assert c.get("/api/remote").status_code == 200
+
+
+def test_play_rejected_for_remote_client(make_client):
+    with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
+        # Authorized by the query token, but playback still refuses a non-local
+        # client — a phone must never launch mpv on the Mac.
+        r = c.post("/api/play?token=sekret", json={"file_id": "fileA", "name": "Arrival"})
+        assert r.status_code == 403
+        assert r.json()["error"] == "local_only"
+
+
+# ---- settings plumbing ----
+
+def test_settings_get_exposes_remote_access(client):
+    assert client.get("/api/settings").json()["remote_access"] is False
+
+
+def test_settings_enable_remote_generates_token_and_flags_restart(client):
+    r = client.post("/api/settings", json={"remote_access": True})
+    body = r.json()
+    assert body["remote_access"] is True
+    assert body["restart_required"] is True          # value changed
+    token = client.get("/api/remote").json()["token"]
+    assert token and len(token) >= 16                # secrets.token_urlsafe(16)
+    # Re-enabling (no change) needs no restart and keeps the same token.
+    r2 = client.post("/api/settings", json={"remote_access": True})
+    assert r2.json()["restart_required"] is False
+    assert client.get("/api/remote").json()["token"] == token
+    # Disabling flips the value again -> restart required.
+    r3 = client.post("/api/settings", json={"remote_access": False})
+    assert r3.json()["restart_required"] is True
+    assert client.get("/api/settings").json()["remote_access"] is False
+
+
+# ---- /api/remote + /api/remote/qr ----
+
+def test_remote_endpoint_lists_tailscale_first(client, monkeypatch):
+    monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: "100.101.102.103")
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: "192.168.1.50")
+    client.post("/api/settings", json={"remote_access": True})
+    body = client.get("/api/remote").json()
+    assert body["enabled"] is True
+    assert body["port"] == 8737
+    assert [u["label"] for u in body["urls"]] == ["Tailscale", "Wi-Fi"]
+    tok = body["token"]
+    assert body["urls"][0]["url"] == "http://100.101.102.103:8737/?token=%s" % tok
+    assert body["urls"][1]["url"] == "http://192.168.1.50:8737/?token=%s" % tok
+
+
+def test_remote_qr_404_when_disabled(client):
+    assert client.get("/api/remote/qr").status_code == 404
+
+
+def test_remote_qr_serves_svg(client, monkeypatch):
+    monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: None)
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: "192.168.1.50")
+    client.post("/api/settings", json={"remote_access": True})
+    r = client.get("/api/remote/qr")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/svg+xml"
+    assert b"<svg" in r.content
+
+
+def test_remote_qr_404_when_no_ip(client, monkeypatch):
+    monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: None)
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: None)
+    client.post("/api/settings", json={"remote_access": True})
+    r = client.get("/api/remote/qr")
+    assert r.status_code == 404
+    assert r.json()["error"] == "no_url"
+
+
+def test_tailscale_ip_filters_cgnat_range(monkeypatch):
+    class _Proc:
+        def __init__(self, stdout, rc=0):
+            self.stdout, self.returncode = stdout, rc
+
+    monkeypatch.setattr(server_mod.subprocess, "run", lambda *a, **k: _Proc("100.101.102.103\n"))
+    assert server_mod._tailscale_ip() == "100.101.102.103"
+    # A non-CGNAT address (e.g. a plain LAN IP) is not a Tailscale address.
+    monkeypatch.setattr(server_mod.subprocess, "run", lambda *a, **k: _Proc("192.168.1.5\n"))
+    assert server_mod._tailscale_ip() is None
+    # Non-zero exit from both candidate commands -> None.
+    monkeypatch.setattr(server_mod.subprocess, "run", lambda *a, **k: _Proc("", rc=1))
+    assert server_mod._tailscale_ip() is None

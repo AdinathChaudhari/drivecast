@@ -6,6 +6,9 @@ Shared Drives as a **cached media library** — movie and TV-show tiles with
 pre-fetched posters, seasons and episodes — and plays files in mpv / IINA / VLC
 while proxying the bytes on demand. Nothing is ever written to disk.
 
+> 📖 **[Read the case study](CASE-STUDY.md)** — how this was designed, built,
+> hardened and shipped, almost entirely through orchestrated AI agents.
+
 **Sections.** The app is split into four areas, each with its own tab, accent
 colour and vocabulary — assign each drive to one in **Settings** (unassigned
 drives stay in Entertainment; the tab bar only appears once you assign

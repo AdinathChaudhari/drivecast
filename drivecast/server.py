@@ -15,6 +15,7 @@ from .history import History
 from .library import Library, Scanner
 from .player import PlayerError, PlayerManager, detect_player
 from .rclone_auth import RcloneError, TokenManager
+from .scan_cache import ScanCache
 from .streaming import Streamer
 from .tmdb import TMDB
 
@@ -33,26 +34,51 @@ class AppState:
         self.streamer = Streamer(self.tokens, self.api)
         self.history = History()
         self.tmdb = TMDB(cfg.get("tmdb_api_key"))
-        self.library = Library()
+        self.library = Library(drive_sections=cfg.get("drive_sections") or {})
         self.library.seed_api_cache(self.api)
         self.scanner = Scanner(self.api, self.tmdb, self.library,
-                               throttle=cfg.get("scan_throttle", 0.15))
+                               throttle=cfg.get("scan_throttle", 0.15),
+                               cache=ScanCache())
         port = cfg.get("port", 8737)
         self.player = PlayerManager(cfg, self.history, "http://127.0.0.1:%d" % port)
         self.setup_error = None  # populated by preflight if rclone is unusable
         self._refresh_task = None
+        self._pending_scope = set()  # scopes requested while a scan was running
 
-    def start_refresh(self):
-        """Kick a background library scan of the selected drives, if idle.
+    def start_refresh(self, scope=None):
+        """Kick a background library scan, if idle.
 
-        Returns True if a scan was started, False if one is already running or
-        no drives are selected.
+        `scope` optionally limits the Drive re-walk to specific selected
+        drives (per-drive refresh); the library is still rebuilt over all
+        selected drives from the scan cache. Returns True if a scan started.
+        A scoped request that arrives while a scan is running is queued and
+        re-kicked when the running scan finishes (a section change saved
+        mid-scan must not be silently dropped).
         """
         drives = self.cfg.get("selected_drives") or []
-        if not drives or self.scanner.status.get("running"):
+        scope = [d for d in (scope or drives) if d in drives]
+        if not scope:
             return False
-        self._refresh_task = asyncio.create_task(self.scanner.scan(drives))
+        if self.scanner.status.get("running"):
+            self._pending_scope.update(scope)
+            return False
+        if self._pending_scope:
+            scope = sorted(set(scope) | self._pending_scope)
+            self._pending_scope.clear()
+        self._refresh_task = asyncio.create_task(self.scanner.scan(
+            drives, scope=scope,
+            drive_hints=self.cfg.get("drive_hints") or {},
+            drive_sections=self.cfg.get("drive_sections") or {}))
+        self._refresh_task.add_done_callback(self._drain_pending_scope)
         return True
+
+    def _drain_pending_scope(self, _task):
+        """After a scan finishes, run any refresh that was requested meanwhile."""
+        if not self._pending_scope:
+            return
+        pending = sorted(self._pending_scope)
+        self._pending_scope.clear()
+        self.start_refresh(scope=pending)
 
     def maybe_autorefresh(self):
         """On startup: rescan if configured to, or if we have drives but no cache."""
@@ -175,24 +201,59 @@ def create_app(cfg=None):
         return rec
 
     @app.post("/api/refresh")
-    async def api_refresh():
+    async def api_refresh(request: Request):
         state = app.state.dc
         if state.setup_error:
             return JSONResponse({"error": "setup", "message": state.setup_error}, status_code=503)
         if state.scanner.status.get("running"):
             return {"started": False, "running": True}
-        if not (state.cfg.get("selected_drives") or []):
+        selected = state.cfg.get("selected_drives") or []
+        if not selected:
             return JSONResponse(
                 {"error": "no_drives", "message": "No drives selected. Pick drives in Settings."},
                 status_code=400,
             )
-        state.start_refresh()
-        return {"started": True, "running": True}
+        # Optional body {"drives": [...]} scopes the refresh to those drives
+        # (must be selected). No/empty body = full refresh (menubar compat).
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        drives = body.get("drives") if isinstance(body, dict) else None
+        if drives is not None and not isinstance(drives, list):
+            return JSONResponse({"error": "bad_request", "message": "drives must be a list"},
+                                status_code=400)
+        if drives:
+            unknown = [d for d in drives if d not in selected]
+            if unknown:
+                return JSONResponse(
+                    {"error": "bad_request",
+                     "message": "Not a selected drive: %s" % ", ".join(unknown)},
+                    status_code=400,
+                )
+        started = state.start_refresh(scope=drives or None)
+        return {"started": started, "running": True, "scope": drives or selected}
 
     @app.get("/api/refresh/status")
     async def api_refresh_status():
         state = app.state.dc
-        return dict(state.scanner.status)
+        st = dict(state.scanner.status)
+        scope = st.get("scope") or []
+        names = {}
+        if scope:
+            try:
+                names = {d["id"]: d.get("name") for d in await state.api.list_drives()}
+            except Exception:
+                pass
+        st["scope_names"] = [names.get(d) or d for d in scope]
+        return st
+
+    @app.get("/api/sections")
+    async def api_sections():
+        """Section metadata for the UI: built-ins plus any custom private
+        section plugins (see sections.py)."""
+        from . import sections as sections_mod
+        return {"sections": sections_mod.meta_list()}
 
     @app.get("/api/settings")
     async def api_get_settings():
@@ -201,6 +262,7 @@ def create_app(cfg=None):
         available = [k for k in ("mpv", "iina", "vlc") if detect_player(k)[0]]
         return {
             "selected_drives": state.cfg.get("selected_drives", []),
+            "drive_sections": state.cfg.get("drive_sections", {}),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "player": state.cfg.get("player", "auto"),
@@ -217,6 +279,28 @@ def create_app(cfg=None):
             if new_drives != (state.cfg.get("selected_drives") or []):
                 drives_changed = True
             state.cfg["selected_drives"] = new_drives
+        # Section assignments: validate values, refresh just the drives whose
+        # section changed (their content must be re-classified).
+        section_changed = []
+        if "drive_sections" in body:
+            from . import sections as sections_mod
+            raw = body.get("drive_sections")
+            if not isinstance(raw, dict):
+                raw = {}
+            selected_now = state.cfg.get("selected_drives") or []
+            valid = sections_mod.all_sections()
+            # Only selected drives can carry an assignment — a stale entry for
+            # an unchecked drive would keep an empty section tab alive.
+            new_sections = {k: v for k, v in raw.items()
+                            if isinstance(k, str) and v in valid
+                            and k in selected_now}
+            old_sections = state.cfg.get("drive_sections") or {}
+            section_changed = [
+                d for d in selected_now
+                if (old_sections.get(d) or "entertainment")
+                != (new_sections.get(d) or "entertainment")
+            ]
+            state.cfg["drive_sections"] = new_sections
         if "auto_refresh_on_startup" in body:
             state.cfg["auto_refresh_on_startup"] = bool(body.get("auto_refresh_on_startup"))
         if "autoplay_next" in body:
@@ -229,9 +313,12 @@ def create_app(cfg=None):
         started = False
         if drives_changed:
             started = state.start_refresh()
+        elif section_changed:
+            started = state.start_refresh(scope=section_changed)
         return {
             "ok": True,
             "selected_drives": state.cfg.get("selected_drives", []),
+            "drive_sections": state.cfg.get("drive_sections", {}),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "refresh_started": started,
@@ -257,11 +344,13 @@ def create_app(cfg=None):
             return JSONResponse({"error": "bad_request", "message": "file_id required"}, status_code=400)
         duration_ms = body.get("duration_ms")
         # Prefer the library cache for duration so playback launches without a
-        # blocking Drive metadata call.
-        if not duration_ms:
-            info = state.library.file_info(file_id)
-            if info:
-                duration_ms = info.get("duration_ms")
+        # blocking Drive metadata call — and for the media kind, so audio
+        # files play windowed no matter which UI path launched them
+        # (Continue shelf and movie tiles don't send media).
+        info = state.library.file_info(file_id)
+        if not duration_ms and info:
+            duration_ms = info.get("duration_ms")
+        media = body.get("media") or (info or {}).get("media")
         drive_id = body.get("drive_id")
         parent_id = body.get("parent_id")
         # Optional autoplay queue: episodes to play AFTER this one. Whitelist the
@@ -275,15 +364,16 @@ def create_app(cfg=None):
                 fid = item.get("file_id")
                 if not fid:
                     continue
+                qinfo = state.library.file_info(fid)
                 qdur = item.get("duration_ms")
-                if not qdur:
-                    info = state.library.file_info(fid)
-                    if info:
-                        qdur = info.get("duration_ms")
+                if not qdur and qinfo:
+                    qdur = qinfo.get("duration_ms")
+                qmedia = item.get("media") or (qinfo or {}).get("media")
                 queue.append({
                     "file_id": fid,
                     "name": item.get("name") or fid,
                     "duration_ms": qdur,
+                    "media": "audio" if qmedia == "audio" else None,
                 })
         if body.get("start_over"):
             # Clear the saved resume position so the player starts at 0.
@@ -293,6 +383,7 @@ def create_app(cfg=None):
             result = state.player.play(
                 file_id, name, duration_ms=duration_ms,
                 drive_id=drive_id, parent_id=parent_id, queue=queue,
+                media="audio" if media == "audio" else None,
             )
             return result
         except PlayerError as e:
@@ -311,13 +402,16 @@ def create_app(cfg=None):
                 item["title_id"] = rec.get("id")
                 item["type"] = rec.get("type")
                 item["poster"] = rec.get("poster")
+                item["section"] = rec.get("section", "entertainment")
         return {"items": items}
 
     @app.get("/api/watched-map")
     async def api_watched_map():
-        """file_id -> last_played epoch, for the client-side "Recently watched" sort."""
+        """file_id -> last_played epoch, for the client-side "Recently watched"
+        sort; plus per-file progress for course/episode completion UI."""
         state = app.state.dc
-        return {"map": state.history.last_played_map()}
+        return {"map": state.history.last_played_map(),
+                "progress": state.history.progress_map()}
 
     @app.post("/api/enrich")
     async def api_enrich(request: Request):

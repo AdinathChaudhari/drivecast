@@ -49,11 +49,16 @@ def client(tmp_path, monkeypatch):
     lib_path.write_text(json.dumps(SYNTHETIC))
 
     # Point the server's Library/Scanner at the temp file.
-    monkeypatch.setattr(server_mod, "Library", lambda: library_mod.Library(path=str(lib_path)))
+    monkeypatch.setattr(server_mod, "Library",
+                        lambda **kw: library_mod.Library(path=str(lib_path), **kw))
 
-    # Keep watch history in the temp dir too — never touch the user's real data.
+    # Keep watch history and the scan cache in the temp dir too — never touch
+    # the user's real data.
     monkeypatch.setattr(server_mod, "History",
                         lambda: history_mod.History(path=str(tmp_path / "history.json")))
+    from drivecast import scan_cache as scan_cache_mod
+    monkeypatch.setattr(server_mod, "ScanCache",
+                        lambda: scan_cache_mod.ScanCache(path=str(tmp_path / "scan_cache.json")))
 
     # No rclone / no Drive network anywhere.
     async def _fake_token(self):
@@ -65,7 +70,8 @@ def client(tmp_path, monkeypatch):
     captured = {}
 
     def _fake_play(self, file_id, name, duration_ms=None, drive_id=None,
-                   parent_id=None, queue=None):
+                   parent_id=None, queue=None, media=None):
+        captured["media"] = media
         captured["file_id"] = file_id
         captured["duration_ms"] = duration_ms
         captured["queue"] = queue
@@ -233,5 +239,66 @@ def test_refresh_status_shape(client):
     r = client.get("/api/refresh/status")
     assert r.status_code == 200
     st = r.json()
-    for k in ("running", "scanned", "total", "added", "removed", "error"):
+    for k in ("running", "scanned", "total", "added", "removed", "error",
+              "scope", "scope_names"):
         assert k in st
+
+
+def _capture_refresh(client):
+    """Stub start_refresh on the live AppState, capturing the scope."""
+    calls = []
+
+    def _fake(scope=None):
+        calls.append(scope)
+        return True
+
+    client.app.state.dc.start_refresh = _fake
+    return calls
+
+
+def test_refresh_scoped_to_one_drive(client):
+    calls = _capture_refresh(client)
+    r = client.post("/api/refresh", json={"drives": ["drv1"]})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["started"] is True
+    assert body["scope"] == ["drv1"]
+    assert calls == [["drv1"]]
+
+
+def test_refresh_bodyless_is_full(client):
+    # The menubar POSTs with no body: full refresh over all selected drives.
+    calls = _capture_refresh(client)
+    r = client.post("/api/refresh")
+    assert r.status_code == 200
+    assert r.json()["scope"] == ["drv1"]
+    assert calls == [None]
+
+
+def test_refresh_rejects_unselected_drive(client):
+    calls = _capture_refresh(client)
+    r = client.post("/api/refresh", json={"drives": ["not-selected"]})
+    assert r.status_code == 400
+    assert calls == []
+
+    r2 = client.post("/api/refresh", json={"drives": "drv1"})   # not a list
+    assert r2.status_code == 400
+
+
+def test_settings_drive_sections_roundtrip_and_scoped_refresh(client):
+    calls = _capture_refresh(client)
+    r = client.post("/api/settings", json={"drive_sections": {"drv1": "podcasts", "x": "bogus"}})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["drive_sections"] == {"drv1": "podcasts"}   # invalid value dropped
+    # Changing drv1's section triggered a refresh scoped to just drv1.
+    assert calls == [["drv1"]]
+    assert client.get("/api/settings").json()["drive_sections"] == {"drv1": "podcasts"}
+
+
+def test_watched_map_progress_shape(client):
+    client.app.state.dc.history.update("fileA", position=3600.0, duration=7200.0, force=True)
+    body = client.get("/api/watched-map").json()
+    assert "map" in body and "progress" in body
+    p = body["progress"]["fileA"]
+    assert p["percent"] == 50.0 and p["watched"] is False

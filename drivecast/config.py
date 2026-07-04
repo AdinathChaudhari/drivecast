@@ -40,6 +40,15 @@ DEFAULTS = {
     "auto_refresh_on_startup": False,  # rescan the library each launch
     "scan_throttle": 0.15,            # seconds to pause between scan API calls
     "autoplay_next": True,            # auto-play the next episode when one finishes
+    # Which app section each drive belongs to: drive_id ->
+    # "entertainment" | "courses" | "podcasts" | a custom plugin section
+    # (see sections.py). Unassigned drives
+    # are entertainment. Set from Settings.
+    "drive_sections": {},
+    # Per-drive classifier hints (hand-edited; no UI). Shapes:
+    #   {"<drive_id>": {"category": "documentary"}}   TMDB-miss category fallback
+    #   {"<drive_id>": {"single_course": true}}       whole drive is ONE course
+    "drive_hints": {},
 }
 
 # Keys we persist back to config.json. Secret keys are deliberately excluded so

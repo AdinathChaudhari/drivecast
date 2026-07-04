@@ -127,6 +127,16 @@ class History:
             return {fid: float(e.get("last_played") or 0.0)
                     for fid, e in self._data.items()}
 
+    def progress_map(self):
+        """{file_id: {"percent": p, "watched": bool}} for every tracked entry.
+
+        Powers per-lesson checkmarks and course progress rings in the UI.
+        """
+        with self._lock:
+            return {fid: {"percent": float(e.get("percent") or 0.0),
+                          "watched": bool(e.get("watched"))}
+                    for fid, e in self._data.items()}
+
     def continue_watching(self):
         """Return partially-watched items for the Continue Watching shelf."""
         with self._lock:

@@ -145,17 +145,30 @@ def build_menu_spec(drives, selected_ids, auto_refresh, setup_ok, port, status_t
     else:
         drive_children.append({"kind": "status", "title": "No drives found"})
 
-    return [
+    items = [
         {"kind": "status", "title": status},
         {"kind": "action", "key": "open", "title": "Open drivecast"},
         {"kind": "sep"},
         {"kind": "submenu", "title": "Drives to include", "children": drive_children},
         {"kind": "action", "key": "refresh", "title": "Refresh library"},
+    ]
+    # Per-drive refresh: one entry per SELECTED drive (user knows where they
+    # uploaded; no need to rescan everything).
+    refresh_children = [
+        {"kind": "action", "key": "refresh_drive:%s" % d["id"],
+         "title": d.get("name") or d["id"]}
+        for d in (drives or []) if d["id"] in selected
+    ]
+    if refresh_children:
+        items.append({"kind": "submenu", "title": "Refresh one drive",
+                      "children": refresh_children})
+    items += [
         {"kind": "check", "key": "auto_refresh", "title": "Auto-refresh on launch",
          "checked": bool(auto_refresh)},
         {"kind": "sep"},
         {"kind": "action", "key": "quit", "title": "Quit"},
     ]
+    return items
 
 
 # ==========================================================================
@@ -236,6 +249,12 @@ def _run_app(server, port, setup_ok, url):
             elif key == "refresh":
                 threading.Thread(
                     target=lambda: _api("POST", base + "/api/refresh"), daemon=True).start()
+            elif key and key.startswith("refresh_drive:"):
+                drive_id = key[len("refresh_drive:"):]
+                threading.Thread(
+                    target=lambda: _api("POST", base + "/api/refresh",
+                                        {"drives": [drive_id]}),
+                    daemon=True).start()
             elif key == "auto_refresh":
                 self._auto_refresh = not self._auto_refresh
                 sender.state = 1 if self._auto_refresh else 0

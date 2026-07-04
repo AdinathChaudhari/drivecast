@@ -40,3 +40,21 @@ def test_build_menu_spec_custom_status_text():
     spec = mb.build_menu_spec(_drives(), [], False, True, 8737,
                               status_text="drivecast: scanning… (1/2)")
     assert spec[0]["title"] == "drivecast: scanning… (1/2)"
+
+
+def test_menu_spec_refresh_drive_submenu():
+    drives = [{"id": "d1", "name": "Anime"}, {"id": "d2", "name": "Courses"},
+              {"id": "d3", "name": "Unselected"}]
+    spec = mb.build_menu_spec(drives, ["d1", "d2"], False, True, 8737)
+    sub = next(it for it in spec
+               if it["kind"] == "submenu" and it["title"] == "Refresh one drive")
+    keys = [c["key"] for c in sub["children"]]
+    assert keys == ["refresh_drive:d1", "refresh_drive:d2"]   # selected only
+    titles = [c["title"] for c in sub["children"]]
+    assert titles == ["Anime", "Courses"]
+
+
+def test_menu_spec_no_refresh_drive_submenu_without_selection():
+    spec = mb.build_menu_spec([{"id": "d1", "name": "X"}], [], False, True, 8737)
+    assert not any(it.get("title") == "Refresh one drive"
+                   for it in spec if it["kind"] == "submenu")

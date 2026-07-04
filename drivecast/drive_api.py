@@ -142,10 +142,15 @@ class DriveAPI:
 
     # ---- browse ----
 
-    async def browse(self, drive_id, folder_id=None, page_token=None, page_size=200):
-        """List folders + video files within a folder of a Shared Drive.
+    async def browse(self, drive_id, folder_id=None, page_token=None, page_size=200,
+                     kinds=("video",)):
+        """List folders + media files within a folder of a Shared Drive.
 
-        Root folder id == the drive id itself.
+        Root folder id == the drive id itself. `kinds` selects which file
+        families come back besides folders — the default matches the classic
+        video-only behaviour; section scans widen it (audio for podcasts and
+        custom audio sections,
+        pdf/image for course materials and covers).
         """
         parent = folder_id or drive_id
         q = "'%s' in parents and trashed = false" % escape_q(parent)
@@ -162,20 +167,36 @@ class DriveAPI:
         if page_token:
             params["pageToken"] = page_token
         data = await self._get(FILES_URL, params)
-        files = self._filter_browse(data.get("files", []))
+        files = self._filter_browse(data.get("files", []), kinds)
         self._cache_metas(files)
         return {"files": files, "nextPageToken": data.get("nextPageToken")}
 
-    def _filter_browse(self, files):
-        """Keep folders and video/* files; drop other google-apps types."""
+    _KIND_PREFIXES = {"video": "video/", "audio": "audio/", "image": "image/"}
+    # Drive reports some audio containers (notably .m4b audiobooks) as
+    # application/octet-stream — fall back to the extension for those.
+    _AUDIO_EXTS = (".mp3", ".m4a", ".m4b", ".aac", ".flac", ".ogg", ".opus", ".wav")
+
+    def _filter_browse(self, files, kinds=("video",)):
+        """Keep folders plus files whose mime family is in `kinds`."""
         out = []
         for f in files:
             mime = f.get("mimeType", "")
             if mime == FOLDER_MIME:
                 out.append(f)
-            elif mime.startswith("video/"):
-                out.append(f)
-            # everything else (docs, sheets, images, audio, etc.) is dropped
+                continue
+            name = (f.get("name") or "").lower()
+            for k in kinds:
+                if k == "pdf" and mime == "application/pdf":
+                    out.append(f)
+                    break
+                if (k == "audio" and mime == "application/octet-stream"
+                        and name.endswith(self._AUDIO_EXTS)):
+                    out.append(f)
+                    break
+                prefix = self._KIND_PREFIXES.get(k)
+                if prefix and mime.startswith(prefix):
+                    out.append(f)
+                    break
         return out
 
     # ---- search ----

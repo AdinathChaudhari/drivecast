@@ -23,6 +23,8 @@
     </nav>
   </header>
 
+  <nav id="sectionTabs" class="section-tabs hidden"></nav>
+
   <div id="banner" class="banner hidden"></div>
   <div id="scanBar" class="scanbar hidden"></div>
 
@@ -30,18 +32,20 @@
     <!-- ===================== Library view ===================== -->
     <div id="libraryView">
       <section id="continueSection" class="shelf hidden">
-        <h2>Continue Watching</h2>
+        <h2 id="continueHead">Continue Watching</h2>
         <div id="continueRow" class="row"></div>
       </section>
 
       <section id="libSection">
         <div class="lib-head">
-          <h2>Your Library</h2>
+          <h2 id="libHead">Your Library</h2>
           <div class="lib-controls">
             <div class="filters" id="filters">
               <button class="chip active" data-filter="all">All</button>
               <button class="chip" data-filter="movie">Movies</button>
               <button class="chip" data-filter="show">TV Shows</button>
+              <button class="chip" data-filter="documentary">Documentaries</button>
+              <button class="chip" data-filter="other">Other</button>
             </div>
             <label class="ctrl">Sort
               <select id="sortSel">

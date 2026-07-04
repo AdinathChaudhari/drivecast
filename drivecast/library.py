@@ -24,12 +24,31 @@ import time
 
 from . import config
 from . import naming
+from . import sections
 from .drive_api import FOLDER_MIME, DriveAPIError
 
 log = logging.getLogger("drivecast.library")
 
 LIBRARY_PATH = os.path.join(config.DATA_DIR, "library.json")
-LIBRARY_VERSION = 1
+LIBRARY_VERSION = 2
+
+
+def migrate_library_v1(data, drive_sections=None):
+    """Upgrade a v1 library dict to v2 in place (pure; returns data).
+
+    Stamps the fields v2 records carry so the app is fully functional before
+    the first rescan: section (from the drive assignment), category (None =
+    provisional until a TMDB pass), media, source_drives.
+    """
+    for rec in (data.get("titles") or {}).values():
+        rec.setdefault("section",
+                       sections.section_for_drive(drive_sections, rec.get("drive_id")))
+        rec.setdefault("category", None)
+        rec.setdefault("media", "video")
+        rec.setdefault("source_drives",
+                       [rec["drive_id"]] if rec.get("drive_id") else [])
+    data["version"] = LIBRARY_VERSION
+    return data
 
 # Guess a mimeType from a filename so seeded HEAD responses are sensible.
 _EXT_MIME = {
@@ -37,6 +56,9 @@ _EXT_MIME = {
     ".avi": "video/x-msvideo", ".mov": "video/quicktime", ".webm": "video/webm",
     ".wmv": "video/x-ms-wmv", ".flv": "video/x-flv", ".mpg": "video/mpeg",
     ".mpeg": "video/mpeg", ".ts": "video/mp2t", ".m2ts": "video/mp2t",
+    ".mp3": "audio/mpeg", ".m4a": "audio/mp4", ".m4b": "audio/mp4",
+    ".aac": "audio/aac", ".flac": "audio/flac", ".ogg": "audio/ogg",
+    ".opus": "audio/opus", ".wav": "audio/wav", ".pdf": "application/pdf",
 }
 
 
@@ -53,6 +75,38 @@ def _is_video(f):
     return (f.get("mimeType") or "").startswith("video/")
 
 
+def _is_audio(f):
+    mime = f.get("mimeType") or ""
+    if mime.startswith("audio/"):
+        return True
+    # Drive reports .m4b audiobooks (and friends) as octet-stream.
+    if mime == "application/octet-stream":
+        return _EXT_MIME.get(os.path.splitext(f.get("name") or "")[1].lower(),
+                             "").startswith("audio/")
+    return False
+
+
+def _is_media(f):
+    """Playable media: video or audio."""
+    return _is_video(f) or _is_audio(f)
+
+
+def _file_dict(f, parent_id):
+    """Normalise a non-media extra (pdf/image) into the node "files" shape."""
+    try:
+        size = int(f.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    return {
+        "id": f.get("id"),
+        "name": f.get("name") or "",
+        "mime": f.get("mimeType") or "",
+        "size": size,
+        "parent_id": parent_id,
+        "thumb": f.get("thumbnailLink"),
+    }
+
+
 def _duration_ms(f):
     vmm = f.get("videoMediaMetadata") or {}
     d = vmm.get("durationMillis")
@@ -63,7 +117,7 @@ def _duration_ms(f):
 
 
 def _video_dict(f, parent_id, ancestors):
-    """Normalise a raw Drive file into the internal video shape used by classify."""
+    """Normalise a raw Drive media file into the internal shape classify uses."""
     try:
         size = int(f.get("size") or 0)
     except (TypeError, ValueError):
@@ -76,6 +130,7 @@ def _video_dict(f, parent_id, ancestors):
         "parent_id": parent_id,
         "ancestors": list(ancestors),
         "thumb": f.get("thumbnailLink"),
+        "media": "audio" if _is_audio(f) else "video",
     }
 
 
@@ -260,7 +315,9 @@ def classify_loose(drive_id, loose_files):
     Files with SxxExx/NxNN markers group into shows keyed by parsed show title;
     everything else is a standalone movie.
     """
-    videos = [f for f in loose_files if _is_video(f) and not naming.is_sample(f.get("name") or "")]
+    videos = [f for f in loose_files
+              if _is_video(f) and not naming.is_sample(f.get("name") or "")
+              and not naming.is_junk(f.get("name") or "")]
     shows = {}
     movies = []
     for f in videos:
@@ -408,6 +465,7 @@ def group_seasons(records, drive_names):
         buckets = {}
         best_q, best_q_rank = None, 0
         thumb = None
+        member_drives = []
         for season_num, rec in g["members"]:
             buckets.setdefault(season_num, []).extend(_episodes_of(rec, season_num))
             r = naming.quality_rank(rec.get("quality"))
@@ -415,6 +473,9 @@ def group_seasons(records, drive_names):
                 best_q, best_q_rank = rec.get("quality"), r
             if thumb is None:
                 thumb = rec.get("_thumb")
+            for d in rec.get("source_drives") or ([rec["drive_id"]] if rec.get("drive_id") else []):
+                if d not in member_drives:
+                    member_drives.append(d)
         seasons = []
         for s in sorted(buckets):
             eps = buckets[s]
@@ -432,6 +493,7 @@ def group_seasons(records, drive_names):
             "tmdb_id": None,
             "overview": None,
             "quality": best_q,
+            "source_drives": member_drives,
             "_thumb": thumb,
             "seasons": seasons,
         })
@@ -468,7 +530,14 @@ def merge_existing_metadata(old_titles, new_titles):
         old = old_titles.get(tid)
         if not old:
             continue
-        for k in ("poster", "tmdb_id", "overview"):
+        # A record reclassified into a different section keeps NOTHING: its
+        # old TMDB poster/overview (matched as a film) would be wrong for a
+        # course/series, and a stale poster would block the cover-image
+        # fallback forever.
+        if ((old.get("section") or "entertainment")
+                != (rec.get("section") or "entertainment")):
+            continue
+        for k in ("poster", "tmdb_id", "overview", "category"):
             if old.get(k) and not rec.get(k):
                 rec[k] = old[k]
 
@@ -507,19 +576,21 @@ def prune_removed_posters(old_titles, new_titles, removed_ids):
 class Library:
     """In-memory catalogue backed by data/library.json (atomic writes)."""
 
-    def __init__(self, path=LIBRARY_PATH):
+    def __init__(self, path=LIBRARY_PATH, drive_sections=None):
         self.path = path
         self._lock = threading.Lock()
-        self.data = self._load()
+        self.data = self._load(drive_sections)
         self._file_index = {}
         self._file_title = {}
         self._rebuild_index()
 
-    def _load(self):
+    def _load(self, drive_sections=None):
         try:
             with open(self.path) as f:
                 data = json.load(f)
             if isinstance(data, dict) and isinstance(data.get("titles"), dict):
+                if (data.get("version") or 1) < LIBRARY_VERSION:
+                    data = migrate_library_v1(data, drive_sections)
                 return data
         except (OSError, ValueError):
             pass
@@ -550,6 +621,7 @@ class Library:
                     "name": rec.get("title"),
                     "size": rec.get("size"),
                     "duration_ms": rec.get("duration_ms"),
+                    "media": rec.get("media") or "video",
                 }
                 owners[rec["file_id"]] = rec.get("id")
             elif rec.get("type") == "show":
@@ -560,8 +632,18 @@ class Library:
                                 "name": ep.get("name"),
                                 "size": ep.get("size"),
                                 "duration_ms": ep.get("duration_ms"),
+                                "media": ep.get("media") or "video",
                             }
                             owners[ep["file_id"]] = rec.get("id")
+                    ab = season.get("audiobook")
+                    if ab and ab.get("file_id"):
+                        idx[ab["file_id"]] = {
+                            "name": ab.get("name"),
+                            "size": ab.get("size"),
+                            "duration_ms": None,
+                            "media": "audio",
+                        }
+                        owners[ab["file_id"]] = rec.get("id")
         self._file_index = idx
         self._file_title = owners
 
@@ -622,6 +704,10 @@ class Library:
                         if ep.get("file_id"):
                             api.seed_meta(self._meta(ep["file_id"], ep.get("name"),
                                                      ep.get("size"), ep.get("duration_ms")))
+                    ab = season.get("audiobook")
+                    if ab and ab.get("file_id"):
+                        api.seed_meta(self._meta(ab["file_id"], ab.get("name"),
+                                                 ab.get("size"), None))
 
     @staticmethod
     def _meta(file_id, name, size, duration_ms):
@@ -639,29 +725,41 @@ class Library:
 
 # -------------------------------------------------------------------- Scanner --
 
-class Scanner:
-    """Walks selected drives and (re)builds the library, quota-resiliently."""
+def _default_cache():
+    from .scan_cache import ScanCache
+    return ScanCache()
 
-    def __init__(self, api, tmdb, library, throttle=0.15):
+
+class Scanner:
+    """Walks selected drives and (re)builds the library, quota-resiliently.
+
+    Every scan writes raw per-drive records into a ScanCache, then rebuilds
+    the whole library from the cache — so a scoped (per-drive) refresh only
+    re-walks that drive on the Drive API while cross-drive grouping stays
+    correct.
+    """
+
+    def __init__(self, api, tmdb, library, throttle=0.15, cache=None):
         self.api = api
         self.tmdb = tmdb
         self.library = library
         self.throttle = throttle
+        self.cache = cache if cache is not None else _default_cache()
         self.status = {
             "running": False, "scanned": 0, "total": 0,
-            "added": 0, "removed": 0, "error": None,
+            "added": 0, "removed": 0, "error": None, "scope": [],
         }
 
     async def _throttle(self):
         if self.throttle:
             await asyncio.sleep(self.throttle)
 
-    async def _list_folder(self, drive_id, folder_id):
+    async def _list_folder(self, drive_id, folder_id, kinds=("video",)):
         """Return all raw children of a folder, following pagination + throttle."""
         out = []
         page_token = None
         while True:
-            res = await self.api.browse(drive_id, folder_id, page_token)
+            res = await self.api.browse(drive_id, folder_id, page_token, kinds=kinds)
             out.extend(res.get("files", []))
             page_token = res.get("nextPageToken")
             await self._throttle()
@@ -669,12 +767,15 @@ class Scanner:
                 break
         return out
 
-    async def _walk_title(self, drive_id, folder, ancestors=()):
+    async def _walk_title(self, drive_id, folder, ancestors=(), kinds=("video",)):
         """Recursively build a nested tree node preserving folder hierarchy.
 
-        node = {id, name, drive_id, videos:[direct videos], subfolders:[child nodes]}
-        Each video carries its ancestor folder-name chain so season detection and
-        episode grouping still work when a show is nested inside a container.
+        node = {id, name, drive_id, videos:[direct media], files:[direct
+        pdf/image extras], subfolders:[child nodes]}. "videos" holds ALL
+        playable media (audio too, when the section's kinds include it — each
+        entry carries a "media" key). Each media file carries its ancestor
+        folder-name chain so season detection and episode grouping still work
+        when a show is nested inside a container.
         """
         name = folder.get("name") or ""
         node = {
@@ -682,39 +783,78 @@ class Scanner:
             "name": name,
             "drive_id": drive_id,
             "videos": [],
+            "files": [],
             "subfolders": [],
         }
         child_anc = tuple(ancestors) + (name,)
-        children = await self._list_folder(drive_id, node["id"])
+        children = await self._list_folder(drive_id, node["id"], kinds)
         for c in children:
+            if naming.is_junk(c.get("name") or ""):
+                continue  # AppleDouble twins / .DS_Store / torrent-ad spam
             if _is_folder(c):
-                node["subfolders"].append(await self._walk_title(drive_id, c, child_anc))
-            elif _is_video(c):
+                node["subfolders"].append(
+                    await self._walk_title(drive_id, c, child_anc, kinds))
+            elif _is_media(c):
                 node["videos"].append(_video_dict(c, node["id"], child_anc))
+            else:
+                node["files"].append(_file_dict(c, node["id"]))
         return node
 
-    async def _scan_drive(self, drive_id):
-        """Return the list of title records for one drive (never raises)."""
+    async def _scan_drive(self, drive_id, section="entertainment", hints=None,
+                          drive_name=""):
+        """Return the list of title records for one drive, or None if the
+        drive's root couldn't be listed (caller keeps the previous cache
+        entry so a flaky drive doesn't empty its titles). Never raises."""
+        kinds = sections.mimes_for(section)
         try:
-            root = await self._list_folder(drive_id, drive_id)
+            root = await self._list_folder(drive_id, drive_id, kinds)
         except DriveAPIError as e:
             log.warning("Skipping drive %s: %s", drive_id, e.message)
             self.status["error"] = "Drive %s: %s" % (drive_id, e.message)
-            return []
+            return None
 
-        records = []
+        nodes = []
         loose = []
         for entry in root:
+            if naming.is_junk(entry.get("name") or ""):
+                continue
             if _is_folder(entry):
                 try:
-                    node = await self._walk_title(drive_id, entry)
+                    nodes.append(await self._walk_title(drive_id, entry, (), kinds))
                 except DriveAPIError as e:
-                    log.warning("Skipping folder %r: %s", entry.get("name"), e.message)
+                    # A partial walk must NOT become the drive's cached truth —
+                    # the failed folder's titles would vanish (and their
+                    # posters be pruned) until this drive is rescanned.
+                    # Invalidate the whole drive; the old cache entry stays.
+                    log.warning("Folder %r failed; keeping the drive's previous "
+                                "scan: %s", entry.get("name"), e.message)
                     self.status["error"] = "Folder %s: %s" % (entry.get("name"), e.message)
-                    continue
-                records.extend(classify_node(node))
-            elif _is_video(entry):
+                    return None
+            elif _is_media(entry):
                 loose.append(entry)
+        return self._classify(section, drive_id, drive_name, nodes, loose,
+                              hints or {})
+
+    def _classify(self, section, drive_id, drive_name, nodes, loose, hints):
+        """Dispatch walked nodes + loose root files to the section's classifier."""
+        if section == "courses":
+            from .courses import classify_course_drive
+            return classify_course_drive(drive_id, drive_name, nodes, loose, hints)
+        if section == "podcasts":
+            from .playlists import classify_playlist_drive
+            return classify_playlist_drive(drive_id, drive_name, nodes, loose)
+        plugin_classify = sections.classify_for(section)
+        if plugin_classify is not None:
+            # Custom private section (see sections.py): plugin classifiers
+            # receive the same node shape as the built-ins.
+            try:
+                return plugin_classify(drive_id, drive_name, nodes, loose)
+            except Exception:  # pragma: no cover - a plugin must not kill scans
+                log.exception("Custom section %r classifier failed", section)
+                return []
+        records = []
+        for node in nodes:
+            records.extend(classify_node(node))
         records.extend(classify_loose(drive_id, loose))
         return records
 
@@ -777,23 +917,64 @@ class Scanner:
                 return
         rec["poster"] = key
 
-    async def scan(self, selected_drives):
-        """Full scan + diff + poster refresh + persist. Never raises."""
-        self.status.update(running=True, scanned=0, total=len(selected_drives),
-                           added=0, removed=0, error=None)
-        try:
-            all_records = []
-            for drive_id in selected_drives:
-                all_records.extend(await self._scan_drive(drive_id))
-                self.status["scanned"] += 1
+    async def scan(self, selected_drives, scope=None, drive_hints=None,
+                   drive_sections=None):
+        """Scan + diff + poster refresh + persist. Never raises.
 
-            # Merge sibling/bare season folders into single shows (needs drive names).
+        `scope` limits which drives are re-walked on the Drive API (per-drive
+        refresh); the library is ALWAYS rebuilt from the cached raw records of
+        every selected drive, so cross-drive grouping stays correct. No scope
+        (or a scope covering everything) is a full refresh.
+        """
+        selected = list(selected_drives)
+        drive_sections = drive_sections or {}
+        drive_hints = drive_hints or {}
+        scope = [d for d in (scope or selected) if d in selected] or selected
+        # First run after upgrade / cleared cache: an unscanned drive with no
+        # cache entry would lose its titles in the rebuild — escalate to full.
+        if any(not self.cache.has(d) for d in selected if d not in scope):
+            scope = list(selected)
+        self.status.update(running=True, scanned=0, total=len(scope),
+                           added=0, removed=0, error=None, scope=list(scope))
+        try:
             try:
                 drive_names = {d["id"]: d.get("name", "") for d in await self.api.list_drives()}
             except Exception:
                 drive_names = {}
-            grouped = group_seasons(all_records, drive_names)
+
+            for drive_id in scope:
+                section = sections.section_for_drive(drive_sections, drive_id)
+                records = await self._scan_drive(
+                    drive_id, section, drive_hints.get(drive_id) or {},
+                    drive_names.get(drive_id, ""))
+                self.status["scanned"] += 1
+                if records is None:
+                    continue  # root listing failed: keep the old cache entry
+                for rec in records:
+                    rec["source_drives"] = [drive_id]
+                    rec["section"] = section
+                    rec.setdefault("media", "video")
+                self.cache.put(drive_id, records)
+            self.cache.prune(selected)
+
+            # Rebuild from cached raw records of ALL selected drives (deep
+            # copies — group_seasons mutates its input).
+            all_records = []
+            for drive_id in selected:
+                all_records.extend(self.cache.get(drive_id))
+
+            # Season-merging is an ENTERTAINMENT concept: a course or podcast
+            # named "... Part 1" must never merge as someone's season.
+            ent = [r for r in all_records
+                   if r.get("section", "entertainment") == "entertainment"]
+            rest = [r for r in all_records
+                    if r.get("section", "entertainment") != "entertainment"]
+            grouped = group_seasons(ent, drive_names) + _strip_transient(rest)
             new_titles = {rec["id"]: rec for rec in grouped}
+            for rec in new_titles.values():
+                rec.setdefault("section", "entertainment")
+                rec.setdefault("media", "video")
+                rec.setdefault("category", None)
 
             old_titles = self.library.snapshot_titles()
             added, removed = diff_library(old_titles, new_titles)
@@ -807,6 +988,11 @@ class Scanner:
             # configured; titles that already have a poster are skipped.
             if self.tmdb.enabled:
                 for rec in new_titles.values():
+                    # TMDB is for entertainment only: a course like
+                    # "Intercourse and Communication" would happily match a
+                    # film. Other sections poster via Drive thumbnails.
+                    if rec.get("section", "entertainment") != "entertainment":
+                        continue
                     poster = rec.get("poster") or ""
                     # dthumb_ fallbacks stay upgradeable: retry TMDB until it
                     # matches, so enabling a key later still fills real posters.
@@ -819,6 +1005,22 @@ class Scanner:
                                 os.remove(os.path.join(config.POSTERS_DIR, poster))
                             except OSError:
                                 pass
+                # Category pass: every entertainment title still uncategorised
+                # gets movie/show/documentary/other from TMDB genres — even
+                # titles that already have a poster (they skip the pass above).
+                # enrich() answers from its cache, so this is cheap.
+                for rec in new_titles.values():
+                    if rec.get("section", "entertainment") != "entertainment":
+                        continue
+                    if rec.get("category") is not None:
+                        continue
+                    hint = ((drive_hints or {}).get(rec.get("drive_id")) or {}).get("category")
+                    media = "tv" if rec["type"] == "show" else "movie"
+                    try:
+                        meta = await self.tmdb.enrich(rec["title"], rec.get("year"), media)
+                    except Exception:  # pragma: no cover - defensive
+                        continue
+                    rec["category"] = sections.category_for(meta, rec["type"], hint)
 
             # Titles TMDB couldn't cover fall back to the video's own Drive
             # thumbnail (also the only poster source when TMDB is disabled).

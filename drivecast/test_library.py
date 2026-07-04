@@ -349,7 +349,8 @@ class _FakeScanAPI:
         self.tree = tree  # folder_id -> [raw file/folder dicts]
         self.seeded = []
 
-    async def browse(self, drive_id, folder_id=None, page_token=None, page_size=200):
+    async def browse(self, drive_id, folder_id=None, page_token=None, page_size=200,
+                     kinds=("video",)):
         key = folder_id or drive_id
         return {"files": self.tree.get(key, []), "nextPageToken": None}
 
@@ -359,6 +360,12 @@ class _FakeScanAPI:
 
 class _DisabledTMDB:
     enabled = False
+
+
+def _cache(tmp_path):
+    """A ScanCache stored in the test's tmp dir (shared within one test)."""
+    from drivecast.scan_cache import ScanCache
+    return ScanCache(path=str(tmp_path / "scan_cache.json"))
 
 
 def test_scan_builds_library_without_network(tmp_path):
@@ -376,7 +383,7 @@ def test_scan_builds_library_without_network(tmp_path):
         ],
     }
     lib = library.Library(path=str(tmp_path / "library.json"))
-    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0)
+    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path))
     status = asyncio.run(scanner.scan(["drv1"]))
     assert status["error"] is None
     assert status["running"] is False
@@ -391,7 +398,8 @@ def test_scan_builds_library_without_network(tmp_path):
 
 def test_scan_survives_folder_rate_limit(tmp_path):
     class _FlakyAPI(_FakeScanAPI):
-        async def browse(self, drive_id, folder_id=None, page_token=None, page_size=200):
+        async def browse(self, drive_id, folder_id=None, page_token=None, page_size=200,
+                         kinds=("video",)):
             if folder_id == "badF":
                 raise DriveAPIError(403, "rate", "rateLimitExceeded")
             return await super().browse(drive_id, folder_id, page_token, page_size)
@@ -401,13 +409,21 @@ def test_scan_survives_folder_rate_limit(tmp_path):
         "goodF": [rawfile("mv", "Arrival.2016.mkv", size=10)],
     }
     lib = library.Library(path=str(tmp_path / "library.json"))
-    scanner = library.Scanner(_FlakyAPI(tree), _DisabledTMDB(), lib, throttle=0)
+    scanner = library.Scanner(_FlakyAPI(tree), _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path))
     status = asyncio.run(scanner.scan(["drv1"]))
-    # The bad folder is skipped, the good one still lands — scan never crashes.
+    # A folder failure invalidates the whole drive's scan (a PARTIAL result
+    # must never become the cached truth) — scan never crashes, error recorded.
     assert status["running"] is False
-    titles = [t["title"] for t in lib.titles_list()]
-    assert "Arrival" in titles
-    assert status["error"] is not None  # recorded the skipped folder
+    assert lib.titles_list() == []           # nothing cached from a partial walk
+    assert status["error"] is not None
+
+    # Once the folder recovers, a rescan lands everything.
+    tree_ok = {k: v for k, v in tree.items()}
+    tree_ok["drv1"] = [rawfolder("goodF", "Arrival (2016)")]
+    scanner2 = library.Scanner(_FakeScanAPI(tree_ok), _DisabledTMDB(), lib, throttle=0,
+                               cache=_cache(tmp_path))
+    asyncio.run(scanner2.scan(["drv1"]))
+    assert [t["title"] for t in lib.titles_list()] == ["Arrival"]
 
 
 # --------------------------------------------- drive thumbnail fallback --------
@@ -447,7 +463,7 @@ def test_scan_falls_back_to_drive_thumbnail(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
     api = _ThumbScanAPI(_thumb_tree())
-    scanner = library.Scanner(api, _DisabledTMDB(), lib, throttle=0)
+    scanner = library.Scanner(api, _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path))
     asyncio.run(scanner.scan(["drv1"]))
     rec = lib.titles_list()[0]
     assert rec["poster"] and rec["poster"].startswith("dthumb_")
@@ -460,7 +476,7 @@ def test_scan_prefers_tmdb_poster_over_drive_thumbnail(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
     api = _ThumbScanAPI(_thumb_tree())
-    scanner = library.Scanner(api, _FakeTMDB(), lib, throttle=0)
+    scanner = library.Scanner(api, _FakeTMDB(), lib, throttle=0, cache=_cache(tmp_path))
     asyncio.run(scanner.scan(["drv1"]))
     rec = lib.titles_list()[0]
     assert rec["poster"] == "tmdb.jpg"
@@ -474,7 +490,7 @@ def test_scan_thumbnail_failure_leaves_poster_none(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
-    scanner = library.Scanner(_NoThumbAPI(_thumb_tree()), _DisabledTMDB(), lib, throttle=0)
+    scanner = library.Scanner(_NoThumbAPI(_thumb_tree()), _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path))
     status = asyncio.run(scanner.scan(["drv1"]))
     assert status["error"] is None
     rec = lib.titles_list()[0]
@@ -488,13 +504,13 @@ def test_rescan_upgrades_dthumb_to_tmdb_poster(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _DisabledTMDB(),
-                                lib, throttle=0).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
     rec = lib.titles_list()[0]
     old_file = os.path.join(config.POSTERS_DIR, rec["poster"])
     assert rec["poster"].startswith("dthumb_") and os.path.exists(old_file)
 
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _FakeTMDB(),
-                                lib, throttle=0).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
     rec = lib.titles_list()[0]
     assert rec["poster"] == "tmdb.jpg"
     assert not os.path.exists(old_file)  # superseded fallback cleaned up
@@ -511,12 +527,12 @@ def test_tmdb_match_without_artwork_keeps_dthumb(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _DisabledTMDB(),
-                                lib, throttle=0).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
     dthumb = lib.titles_list()[0]["poster"]
     assert dthumb.startswith("dthumb_")
 
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _NoArtTMDB(),
-                                lib, throttle=0).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
     rec = lib.titles_list()[0]
     assert rec["poster"] == dthumb          # fallback survives
     assert rec["tmdb_id"] == 7              # metadata still enriched
@@ -528,12 +544,12 @@ def test_rescan_restores_missing_dthumb_file(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _DisabledTMDB(),
-                                lib, throttle=0).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
     poster_file = os.path.join(config.POSTERS_DIR, lib.titles_list()[0]["poster"])
     os.remove(poster_file)
 
     api = _ThumbScanAPI(_thumb_tree())
-    asyncio.run(library.Scanner(api, _DisabledTMDB(), lib, throttle=0).scan(["drv1"]))
+    asyncio.run(library.Scanner(api, _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
     assert api.thumb_fetches                 # re-downloaded
     assert os.path.exists(poster_file)
 
@@ -645,3 +661,402 @@ def test_group_passthrough_strips_transient_keys():
     out = library.group_seasons([movie], {"d": "Movies"})
     assert len(out) == 1 and out[0]["id"] == "mv" and out[0]["type"] == "movie"
     assert "_folder_name" not in out[0] and "_video_name" not in out[0]
+
+
+# --------------------------------------------------- per-drive refresh (M1) ----
+
+def _two_drive_tree():
+    """drv1: a movie; drv2: a movie. Independent content."""
+    return {
+        "drv1": [rawfolder("m1F", "Arrival (2016)")],
+        "m1F": [rawfile("mv1", "Arrival.2016.1080p.mkv", size=10)],
+        "drv2": [rawfolder("m2F", "Sicario (2015)")],
+        "m2F": [rawfile("mv2", "Sicario.2015.1080p.mkv", size=10)],
+    }
+
+
+def test_partial_refresh_equals_full_refresh(tmp_path):
+    tree = _two_drive_tree()
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    full = {t["id"]: t for t in lib.titles_list()}
+    assert set(full) == {"mv1", "mv2"}
+
+    # Add a movie to drv2, then refresh ONLY drv2.
+    tree["drv2"].append(rawfolder("m3F", "Dune (2021)"))
+    tree["m3F"] = [rawfile("mv3", "Dune.2021.2160p.mkv", size=10)]
+    asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"]))
+    titles = {t["id"]: t for t in lib.titles_list()}
+    # drv1's title survives untouched; drv2's addition landed.
+    assert set(titles) == {"mv1", "mv2", "mv3"}
+    assert scanner.status["scope"] == ["drv2"]
+    assert scanner.status["total"] == 1
+
+
+def test_partial_refresh_preserves_cross_drive_grouped_show(tmp_path):
+    # A show split across two "Part" drives groups into one grp: record; a
+    # partial refresh of either drive must keep BOTH seasons.
+    tree = {
+        "dM1": [rawfolder("s1F", "Season 1")],
+        "s1F": [rawfile("m1e1", "ep1.mkv"), rawfile("m1e2", "ep2.mkv")],
+        "dM2": [rawfolder("s5F", "Season 5")],
+        "s5F": [rawfile("m5e1", "ep1.mkv")],
+    }
+
+    class _NamedAPI(_FakeScanAPI):
+        async def list_drives(self, force=False):
+            return [{"id": "dM1", "name": "TV | Malcom in the Middle (Part 1)"},
+                    {"id": "dM2", "name": "TV | Malcom in the Middle (Part 2)"}]
+
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_NamedAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["dM1", "dM2"]))
+    rec = only(lib.titles_list())
+    assert rec["id"].startswith("grp:")
+    assert sorted(s["season"] for s in rec["seasons"]) == [1, 5]
+    assert set(rec["source_drives"]) == {"dM1", "dM2"}
+    grp_id = rec["id"]
+
+    # Refresh only Part 2: the grouped show keeps both seasons, same id.
+    asyncio.run(scanner.scan(["dM1", "dM2"], scope=["dM2"]))
+    rec2 = only(lib.titles_list())
+    assert rec2["id"] == grp_id
+    assert sorted(s["season"] for s in rec2["seasons"]) == [1, 5]
+
+
+def test_scan_failure_keeps_previous_titles(tmp_path):
+    tree = _two_drive_tree()
+
+    class _FailingRootAPI(_FakeScanAPI):
+        fail_drive = None
+
+        async def browse(self, drive_id, folder_id=None, page_token=None, page_size=200,
+                         kinds=("video",)):
+            if self.fail_drive and (folder_id or drive_id) == self.fail_drive:
+                raise DriveAPIError(500, "boom", "backendError")
+            return await super().browse(drive_id, folder_id, page_token, page_size)
+
+    api = _FailingRootAPI(tree)
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(api, _DisabledTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    assert {t["id"] for t in lib.titles_list()} == {"mv1", "mv2"}
+
+    # drv1's root now errors: a rescan must NOT drop drv1's titles.
+    api.fail_drive = "drv1"
+    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    assert {t["id"] for t in lib.titles_list()} == {"mv1", "mv2"}
+    assert scanner.status["error"] is not None
+
+
+def test_partial_scope_escalates_when_sibling_cache_missing(tmp_path):
+    # Fresh cache + a scoped request: scanning only the scope would drop every
+    # uncached drive's titles, so the scan escalates to all selected drives.
+    tree = _two_drive_tree()
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"]))
+    assert scanner.status["total"] == 2                    # escalated to full
+    assert set(scanner.status["scope"]) == {"drv1", "drv2"}
+    assert {t["id"] for t in lib.titles_list()} == {"mv1", "mv2"}
+
+
+def test_deselected_drive_pruned_from_cache_and_library(tmp_path):
+    tree = _two_drive_tree()
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    cache = _cache(tmp_path)
+    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                              cache=cache)
+    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    assert set(cache.drive_ids()) == {"drv1", "drv2"}
+
+    # Deselect drv2: its titles and cache entry disappear.
+    asyncio.run(scanner.scan(["drv1"]))
+    assert {t["id"] for t in lib.titles_list()} == {"mv1"}
+    assert cache.drive_ids() == ["drv1"]
+
+
+def test_added_at_stable_across_partial_refresh(tmp_path):
+    tree = _two_drive_tree()
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    first = lib.get("mv1")["added_at"]
+    asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"]))
+    assert lib.get("mv1")["added_at"] == first
+
+
+def test_scan_cache_get_returns_deep_copies(tmp_path):
+    from drivecast.scan_cache import ScanCache
+    cache = ScanCache(path=str(tmp_path / "sc.json"))
+    cache.put("d1", [{"id": "a", "seasons": [{"season": 1, "episodes": []}]}])
+    got = cache.get("d1")
+    got[0]["seasons"][0]["season"] = 99      # mutate the copy
+    assert cache.get("d1")[0]["seasons"][0]["season"] == 1   # cache pristine
+
+
+# ------------------------------------------------------- categorization (M2) --
+
+def test_category_for_matrix():
+    from drivecast import sections
+    # No TMDB match -> other, unless a drive hint overrides.
+    assert sections.category_for(None, "movie") == "other"
+    assert sections.category_for(None, "show", "documentary") == "documentary"
+    # Genre 99 -> documentary regardless of structure.
+    assert sections.category_for({"genre_ids": [18, 99]}, "movie") == "documentary"
+    assert sections.category_for({"genre_ids": [99]}, "show") == "documentary"
+    # Otherwise the structural type.
+    assert sections.category_for({"genre_ids": [35]}, "show") == "show"
+    assert sections.category_for({"genre_ids": []}, "movie") == "movie"
+
+
+def test_tmdb_cache_heal_drops_genreless_entries():
+    from drivecast.tmdb import TMDB
+    healed = TMDB._heal_cache({
+        "movie|old|2000": {"tmdb_id": 1, "poster_key": "p.jpg"},   # pre-genres
+        "movie|new|2020": {"tmdb_id": 2, "genre_ids": [28]},
+        "movie|miss|": None,                                        # negative marker
+    })
+    assert "movie|old|2000" not in healed
+    assert healed["movie|new|2020"]["tmdb_id"] == 2
+    assert "movie|miss|" in healed and healed["movie|miss|"] is None
+
+
+class _GenreTMDB:
+    """TMDB stub: 'India The Modi Question' is a documentary; others match
+    plain movies; 'Unknown' has no TMDB entry at all."""
+    enabled = True
+
+    async def enrich(self, title, year=None, media_type="movie"):
+        if "modi" in title.lower():
+            return {"tmdb_id": 9, "title": title, "year": year,
+                    "poster_key": None, "overview": None, "genre_ids": [99]}
+        if "unknown" in title.lower():
+            return None
+        return {"tmdb_id": 5, "title": title, "year": year,
+                "poster_key": None, "overview": None, "genre_ids": [35]}
+
+
+def test_scanner_stamps_categories(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    tree = {
+        "drv1": [rawfolder("docF", "India The Modi Question"),
+                 rawfolder("movF", "Arrival (2016)"),
+                 rawfolder("unkF", "Unknown Home Video")],
+        "docF": [rawfile("d1", "India.The.Modi.Question.S01E01.mkv"),
+                 rawfile("d2", "India.The.Modi.Question.S01E02.mkv")],
+        "movF": [rawfile("m1", "Arrival.2016.1080p.mkv")],
+        "unkF": [rawfile("u1", "Unknown Home Video.mp4")],
+    }
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _GenreTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1"]))
+    cats = {t["title"]: t["category"] for t in lib.titles_list()}
+    assert cats["India The Modi Question"] == "documentary"
+    assert cats["Arrival"] == "movie"
+    assert cats["Unknown Home Video"] == "other"
+
+
+def test_scanner_category_hint_overrides_no_match(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    tree = {"drv1": [rawfolder("unkF", "Unknown Nature Film")],
+            "unkF": [rawfile("u1", "Unknown Nature Film.mp4")]}
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _GenreTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1"],
+                             drive_hints={"drv1": {"category": "documentary"}}))
+    assert only(lib.titles_list())["category"] == "documentary"
+
+
+def test_category_carried_across_rescans(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    tree = {"drv1": [rawfolder("movF", "Arrival (2016)")],
+            "movF": [rawfile("m1", "Arrival.2016.mkv")]}
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _GenreTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1"]))
+    assert only(lib.titles_list())["category"] == "movie"
+    # Rescan with TMDB disabled: the category is carried, not wiped.
+    scanner2 = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                               cache=_cache(tmp_path))
+    asyncio.run(scanner2.scan(["drv1"]))
+    assert only(lib.titles_list())["category"] == "movie"
+
+
+def test_category_null_when_tmdb_disabled(tmp_path):
+    tree = {"drv1": [rawfolder("movF", "Arrival (2016)")],
+            "movF": [rawfile("m1", "Arrival.2016.mkv")]}
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1"]))
+    assert only(lib.titles_list())["category"] is None
+
+
+# ------------------------------------------------------- sections (M3) --------
+
+def test_migrate_library_v1_stamps_fields(tmp_path):
+    import json as _json
+    v1 = {"version": 1, "generated_at": 1.0, "titles": {
+        "movieA": {"id": "movieA", "type": "movie", "title": "Arrival",
+                   "drive_id": "drv1", "file_id": "fA", "size": 1},
+    }}
+    p = tmp_path / "library.json"
+    p.write_text(_json.dumps(v1))
+    lib = library.Library(path=str(p), drive_sections={"drv1": "courses"})
+    rec = lib.get("movieA")
+    assert lib.data["version"] == library.LIBRARY_VERSION
+    assert rec["section"] == "courses"
+    assert rec["category"] is None
+    assert rec["media"] == "video"
+    assert rec["source_drives"] == ["drv1"]
+    # ids unchanged; file index still works
+    assert lib.title_for_file("fA")["id"] == "movieA"
+
+
+def test_scan_stamps_section_and_skips_tmdb_for_non_entertainment(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    tree = {"drv1": [rawfolder("cF", "Intercourse and Communication")],
+            "cF": [rawfile("c1", "1 - Tactical Empathy.mp4"),
+                   rawfile("c2", "2 - Mirroring.mp4")]}
+
+    calls = []
+
+    class _SpyTMDB:
+        enabled = True
+
+        async def enrich(self, title, year=None, media_type="movie"):
+            calls.append(title)
+            return {"tmdb_id": 1, "title": title, "year": year,
+                    "poster_key": "wrong.jpg", "overview": None, "genre_ids": []}
+
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _SpyTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1"], drive_sections={"drv1": "courses"}))
+    recs = lib.titles_list()
+    assert recs and all(r["section"] == "courses" for r in recs)
+    assert calls == []                      # TMDB never consulted for courses
+    assert all(not r.get("poster") for r in recs)   # no film posters attached
+
+
+def test_course_named_part1_never_merges_as_season(tmp_path):
+    # An entertainment drive has "X Season 1"-style folders; a COURSES drive
+    # has a "(Part 1)" folder — grouping must only appl to entertainment.
+    tree = {
+        "ent": [rawfolder("s1", "Blackadder Season 1 S01")],
+        "s1": [rawfile("e1", "ep1.mkv"), rawfile("e2", "ep2.mkv")],
+        "crs": [rawfolder("p1", "Python Data Science (Part 1)")],
+        "p1": [rawfile("l1", "01) Intro.mp4"), rawfile("l2", "02) Lists.mp4")],
+    }
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["ent", "crs"], drive_sections={"crs": "courses"}))
+    secs = {t["title"]: t["section"] for t in lib.titles_list()}
+    assert any(s == "courses" for s in secs.values())
+    course = next(t for t in lib.titles_list() if t["section"] == "courses")
+    assert not course["id"].startswith("grp:")   # never season-grouped
+
+
+def test_scan_dispatches_course_and_plugin_classifiers(tmp_path, monkeypatch):
+    # End-to-end through Scanner: a courses drive uses the course classifier,
+    # and a drive assigned to a CUSTOM plugin section uses its classifier.
+    from drivecast import sections as sections_mod
+
+    def _plugin_classify(drive_id, drive_name, nodes, loose):
+        # A tiny audio-series classifier: volume folders -> named seasons.
+        seasons = []
+        for node in nodes:
+            for i, sf in enumerate(node["subfolders"]):
+                eps = [{"title": v["name"], "episode": j + 1,
+                        "file_id": v["id"], "name": v["name"],
+                        "duration_ms": v.get("duration_ms"), "size": v.get("size"),
+                        "parent_id": v.get("parent_id"), "media": "audio"}
+                       for j, v in enumerate(sf["videos"])]
+                seasons.append({"season": i + 1, "name": sf["name"], "episodes": eps})
+            if seasons:
+                return [{"id": node["id"], "type": "show", "title": node["name"],
+                         "year": None, "drive_id": drive_id, "folder_id": node["id"],
+                         "poster": None, "tmdb_id": None, "overview": None,
+                         "quality": None, "shelf": "Series", "media": "audio",
+                         "_thumb": None, "seasons": seasons}]
+        return []
+
+    monkeypatch.setattr(sections_mod, "_plugins", {
+        "myaudio": {"key": "myaudio", "label": "My Audio", "icon": "♪",
+                    "mimes": ("video", "audio"), "classify": _plugin_classify},
+    })
+
+    tree = {
+        # courses drive: one flat course with two numbered lessons + workbook
+        "crs": [rawfolder("courseF", "Art_of_Negotiation")],
+        "courseF": [
+            rawfile("l1", "1 - Tactical Empathy.mp4", dur=600000),
+            rawfile("l2", "2 - Mirroring.mp4", dur=650000),
+            rawfile("wb", "Class Workbook.pdf", mime="application/pdf"),
+        ],
+        # plugin drive: one series folder with one volume of audio tracks
+        "aud": [rawfolder("seriesF", "Morning Series")],
+        "seriesF": [rawfolder("v1F", "Volume 01")],
+        "v1F": [rawfile("t1", "01 Track One.mp3", mime="audio/mpeg"),
+                rawfile("t2", "02 Track Two.mp3", mime="audio/mpeg")],
+    }
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["crs", "aud"],
+                             drive_sections={"crs": "courses", "aud": "myaudio"}))
+    by_section = {}
+    for t in lib.titles_list():
+        by_section.setdefault(t["section"], []).append(t)
+
+    course = only(by_section["courses"])
+    assert course["type"] == "show"
+    assert course["title"] == "Art of Negotiation"
+    eps = course["seasons"][0]["episodes"]
+    assert [e["episode"] for e in eps] == [1, 2]
+    assert course["materials"] and course["materials"][0]["name"] == "Class Workbook.pdf"
+
+    series = only(by_section["myaudio"])
+    assert series["media"] == "audio"
+    assert series["shelf"] == "Series"
+    vol = series["seasons"][0]
+    assert vol["name"] == "Volume 01"
+    assert [e["episode"] for e in vol["episodes"]] == [1, 2]
+    assert all(e.get("media") == "audio" for e in vol["episodes"])
+    # plugin episodes indexed for playback + Continue enrichment
+    assert lib.title_for_file("t1")["id"] == series["id"]
+
+
+def test_plugin_loading_from_dir(tmp_path, monkeypatch):
+    # A SECTION plugin dropped into the plugin dir loads; junk files are
+    # ignored and a broken plugin never crashes the app.
+    from drivecast import sections as sections_mod
+    plug_dir = tmp_path / "sections"
+    plug_dir.mkdir()
+    (plug_dir / "custom.py").write_text(
+        "def classify(drive_id, drive_name, nodes, loose):\n"
+        "    return []\n"
+        "SECTION = {'key': 'custom', 'label': 'Custom', 'icon': '*',\n"
+        "           'mimes': ('video',), 'classify': classify}\n")
+    (plug_dir / "broken.py").write_text("raise RuntimeError('boom')\n")
+    (plug_dir / "notaplugin.py").write_text("x = 1\n")
+    monkeypatch.setattr(sections_mod, "PLUGIN_DIR", str(plug_dir))
+    monkeypatch.setattr(sections_mod, "_plugins", None)   # reset the cache
+    assert "custom" in sections_mod.all_sections()
+    assert sections_mod.mimes_for("custom") == ("video",)
+    assert callable(sections_mod.classify_for("custom"))
+    assert sections_mod.classify_for("entertainment") is None
+    metas = {m["key"] for m in sections_mod.meta_list()}
+    assert metas == {"entertainment", "courses", "podcasts", "custom"}
+    monkeypatch.setattr(sections_mod, "_plugins", None)   # don't leak to other tests

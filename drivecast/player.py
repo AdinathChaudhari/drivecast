@@ -80,17 +80,24 @@ def should_advance(position, duration):
     return (duration - position) <= FINISH_TAIL_SECONDS
 
 
-def build_mpv_args(path, sock, resume, name, url):
-    """Construct the mpv command line (IPC + resume + title + cache/hwdec)."""
-    return [
+def build_mpv_args(path, sock, resume, name, url, media=None):
+    """Construct the mpv command line (IPC + resume + title + cache/hwdec).
+
+    Audio-only files need --force-window: mpv runs with --no-terminal, so
+    without a window there'd be no UI at all to pause/seek/quit from.
+    """
+    args = [
         path,
         "--input-ipc-server=%s" % sock,
         "--start=%d" % int(resume),
         "--force-media-title=%s" % name,
         "--no-terminal",
         *MPV_CACHE_FLAGS,
-        url,
     ]
+    if media == "audio":
+        args.append("--force-window=immediate")
+    args.append(url)
+    return args
 
 
 def build_iina_args(path, sock, resume, name, url):
@@ -194,7 +201,7 @@ class PlayerManager:
         return "%s/stream/%s" % (self.base_url, file_id)
 
     def play(self, file_id, name, duration_ms=None, drive_id=None, parent_id=None,
-             queue=None):
+             queue=None, media=None):
         """Launch the configured player at the resume position.
 
         `queue` is an optional ordered list of upcoming items
@@ -219,12 +226,13 @@ class PlayerManager:
         self._stop_current_session()
 
         resume = self._launch(kind, path, file_id, name, duration_ms,
-                              drive_id, parent_id, list(queue or []))
+                              drive_id, parent_id, list(queue or []), media=media)
         return {"player": kind, "resumed_from": resume}
 
     # ---- launchers ----
 
-    def _launch(self, kind, path, file_id, name, duration_ms, drive_id, parent_id, queue):
+    def _launch(self, kind, path, file_id, name, duration_ms, drive_id, parent_id, queue,
+                media=None):
         """Resolve resume/url/duration and dispatch to the per-player launcher.
 
         Shared by play() and the autoplay-advance path so both start a session
@@ -234,16 +242,18 @@ class PlayerManager:
         url = self.stream_url(file_id)
         duration = (float(duration_ms) / 1000.0) if duration_ms else None
         if kind == "mpv":
-            self._launch_mpv(path, file_id, name, url, resume, duration, drive_id, parent_id, queue)
+            self._launch_mpv(path, file_id, name, url, resume, duration, drive_id,
+                             parent_id, queue, media=media)
         elif kind == "iina":
             self._launch_iina(path, file_id, name, url, resume, duration, drive_id, parent_id, queue)
         else:  # vlc
             self._launch_vlc(path, file_id, name, url, resume, duration, drive_id, parent_id, queue)
         return resume
 
-    def _launch_mpv(self, path, file_id, name, url, resume, duration, drive_id, parent_id, queue):
+    def _launch_mpv(self, path, file_id, name, url, resume, duration, drive_id,
+                    parent_id, queue, media=None):
         sock = "/tmp/drivecast-%s.sock" % uuid.uuid4().hex[:12]
-        args = build_mpv_args(path, sock, resume, name, url)
+        args = build_mpv_args(path, sock, resume, name, url, media=media)
         proc = subprocess.Popen(args)
         self._start_poller("mpv", path, proc, sock, file_id, name, duration,
                            drive_id, parent_id, queue)
@@ -296,7 +306,8 @@ class PlayerManager:
         try:
             self._launch(kind, path, nxt.get("file_id"),
                          nxt.get("name") or nxt.get("file_id"),
-                         nxt.get("duration_ms"), drive_id, parent_id, rest)
+                         nxt.get("duration_ms"), drive_id, parent_id, rest,
+                         media=nxt.get("media"))
         except Exception as exc:  # pragma: no cover - defensive
             log.debug("autoplay advance failed: %r", exc)
 

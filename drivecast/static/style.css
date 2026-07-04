@@ -10,6 +10,26 @@
   --card-h: 240px; /* 2:3 poster */
 }
 
+/* Each section re-tints the app: the accent pair drives tabs, chips, buttons,
+   progress and placeholder gradients. Values come from the section metadata
+   (/api/sections) and are applied as inline custom properties by setSection —
+   entertainment clears them back to the :root defaults above. */
+
+/* ---- section tabs ---- */
+.section-tabs {
+  display: flex; gap: 6px; padding: 10px 28px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.section-tab {
+  padding: 10px 16px 12px; cursor: pointer; user-select: none;
+  color: var(--muted); font-size: 14px; font-weight: 600;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.section-tab:hover { color: var(--text); }
+.section-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.section-tab .tab-icon { margin-right: 4px; }
+
 * { box-sizing: border-box; }
 
 body {
@@ -165,6 +185,22 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #d6d6dc; }
   backdrop-filter: blur(4px);
 }
 
+/* course progress ring (conic-gradient, no SVG) */
+.ring {
+  position: absolute; top: 8px; right: 8px; z-index: 1;
+  width: 26px; height: 26px; border-radius: 50%;
+  background: conic-gradient(var(--accent) calc(var(--p) * 1%), rgba(255,255,255,0.18) 0);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+  mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+}
+.ring.full { animation: ring-pulse 0.9s ease 1; }
+@keyframes ring-pulse {
+  0% { transform: scale(1); }
+  40% { transform: scale(1.35); }
+  100% { transform: scale(1); }
+}
+.badge.done { background: var(--accent); color: #0b0b10; }
+
 .progress {
   position: absolute; left: 0; right: 0; bottom: 0;
   height: 4px; background: rgba(255,255,255,0.15);
@@ -293,6 +329,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #d6d6dc; }
 }
 .episodes { display: flex; flex-direction: column; gap: 6px; }
 .episode {
+  position: relative; overflow: hidden;
   display: grid; grid-template-columns: 48px 1fr auto 24px; align-items: center; gap: 12px;
   padding: 12px 16px; border-radius: 10px; cursor: pointer;
   background: var(--panel); border: 1px solid rgba(255,255,255,0.05);
@@ -302,6 +339,22 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #d6d6dc; }
 .episode .ep-title { font-size: 14px; }
 .episode .ep-dur { color: var(--muted); font-size: 12px; }
 .episode .ep-play { color: var(--muted); }
+.episode.watched .ep-title { color: var(--muted); }
+.episode .ep-done { color: var(--accent); font-weight: 700; }
+.episode .ep-audio { color: var(--muted); }
+.episode .progress { border-radius: 0 0 10px 10px; }
+
+/* play a whole volume/season ripped as one audiobook file */
+.audiobook-btn { align-self: flex-start; margin-bottom: 6px; }
+
+/* course materials (workbook PDFs etc.) */
+.materials-head { font-size: 14px; color: var(--muted); margin: 24px 0 8px; }
+.material {
+  display: inline-block; margin: 0 10px 8px 0; padding: 8px 14px;
+  background: var(--panel); border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 10px; color: var(--text); text-decoration: none; font-size: 13px;
+}
+.material:hover { border-color: var(--accent); }
 
 /* ---- settings ---- */
 .settings-card {
@@ -316,6 +369,19 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #d6d6dc; }
   border-radius: 10px; cursor: pointer;
 }
 .drive-row:hover { background: var(--panel-2); }
+.drive-row .drive-name { flex: 1; }
+.drive-row select.drive-section {
+  padding: 4px 8px; border-radius: 8px; background: var(--panel-2);
+  color: var(--text); border: 1px solid rgba(255,255,255,0.1); font-size: 12px;
+}
+.drive-refresh {
+  border: 1px solid rgba(255,255,255,0.12); background: transparent;
+  color: var(--muted); border-radius: 8px; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 4px 8px;
+  opacity: 0; transition: opacity 0.12s ease;
+}
+.drive-row:hover .drive-refresh { opacity: 1; }
+.drive-refresh:hover { color: var(--accent); border-color: var(--accent); }
 .drive-row input, .toggle input { width: 16px; height: 16px; accent-color: var(--accent); }
 .toggle { margin-top: 8px; }
 .settings-actions { margin-top: 22px; display: flex; align-items: center; gap: 14px; }

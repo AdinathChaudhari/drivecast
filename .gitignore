@@ -26,3 +26,7 @@ gdrive_client*.json
 # Personal working docs — kept local, never published
 CASE_STUDY.md
 DISCUSSION.md
+
+# Local working docs + session config (never published)
+SECTIONS_DESIGN.md
+.claude/

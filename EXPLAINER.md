@@ -272,12 +272,34 @@ keeps that value across refreshes (carried over like poster metadata), so the
 **Refresh diffing.** A refresh rescans and diffs against the existing library:
 newly-found titles are added, titles whose files are gone are removed (and their
 now-orphaned posters deleted), and show episode lists are updated in place. A
-`/api/refresh/status` endpoint drives the progress bar. The *scan* itself is
-always complete — every selected drive is walked every time, and the diff only
-determines what changed afterwards. A per-drive (or otherwise incremental)
-refresh doesn't exist yet; it's a natural future optimisation since
-`Scanner.scan()` already takes a list of drive ids, but today the result would
-replace the whole library, so it must always be fed the full selection.
+`/api/refresh/status` endpoint drives the progress bar.
+
+**Per-drive refresh.** You usually know exactly which drive you uploaded to,
+so drivecast can rescan just that one: every scan stores each drive's raw
+(pre-merge) records in `data/scan_cache.json`, and the library is then rebuilt
+from the cache of **all** selected drives. A scoped refresh only re-walks the
+scoped drive on the Drive API; everything else replays from cache — which is
+what keeps a show split across two drives ("Part 1"/"Part 2" merged into one
+tile) correct no matter which half you refresh. A drive whose scan errors
+keeps its previous titles, and the first refresh after upgrading escalates to
+a full scan to seed the cache.
+
+**Sections.** Each drive is assigned (Settings) to a section —
+Entertainment, Courses, Podcasts, or a **custom private plugin section** — and
+each section gets its own tab, accent colour, classifier and vocabulary.
+Course drives classify into modules/lessons (numbered files ordered properly,
+workbook PDFs as materials, progress rings + a Resume-course button); podcast
+drives become channel tiles. Custom sections are plain `.py` plugins dropped
+into the private user directory (never the repo): they declare a small
+`SECTION` manifest (label, icon, accent, season/episode nouns, mime families)
+plus a pure classifier, and get the full UI — tabs, shelves, audiobooks,
+progress — for free. Audio streams through the exact same Range proxy as
+video — mpv just gets a `--force-window` flag so audio-only playback still
+has a window. Entertainment additionally gets
+**categories** (Movies / TV Shows / Documentaries / Other) from the TMDB
+genres we already fetch for posters — genre 99 is Documentary; a title TMDB
+doesn't know lands in Other. TMDB is never consulted for the other sections
+(a course named "Intercourse and Communication" would happily match a film).
 
 **Posters, pre-cached.** During the scan, every title that doesn't already have a
 poster is resolved against **TMDB** (movie vs TV, by title+year, if you set an API

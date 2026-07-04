@@ -1,10 +1,31 @@
 # drivecast
 
-Stream video straight from your Google **Shared Drives** — no downloads, no
-syncing. drivecast is a tiny local web app that presents your Shared Drives as a
-**cached media library** — movie and TV-show tiles with pre-fetched posters,
-seasons and episodes — and plays files in mpv / IINA / VLC while proxying the
-bytes on demand. Nothing is ever written to disk.
+Stream video (and audio) straight from your Google **Shared Drives** — no
+downloads, no syncing. drivecast is a tiny local web app that presents your
+Shared Drives as a **cached media library** — movie and TV-show tiles with
+pre-fetched posters, seasons and episodes — and plays files in mpv / IINA / VLC
+while proxying the bytes on demand. Nothing is ever written to disk.
+
+**Sections.** The app is split into four areas, each with its own tab, accent
+colour and vocabulary — assign each drive to one in **Settings** (unassigned
+drives stay in Entertainment; the tab bar only appears once you assign
+something):
+
+- 🍿 **Entertainment** — movies & TV shows, with category chips
+  (Movies / TV Shows / Documentaries / Other) derived from TMDB genres.
+- 🎓 **Courses** — course drives become courses with **Modules** and
+  **Lessons**: numbered lesson files are ordered correctly, module folders
+  become a module picker, workbook PDFs appear as **Materials**, tiles carry a
+  **progress ring**, and **Resume course** continues from your first unwatched
+  lesson (autoplay chains the rest of the course).
+- 🎙 **Podcasts** — each folder on a podcasts drive (e.g. YouTube downloads)
+  becomes a channel tile with its episodes; audio files stream to mpv exactly
+  like video, with resume.
+- **Custom private sections** — drop a plugin `.py` into
+  `~/Library/Application Support/drivecast/sections/` (same private home as
+  your secrets, never part of the repo) to add a fully personal section with
+  its own tab, accent colour, vocabulary and classifier — see the docstring in
+  `drivecast/sections.py` for the tiny plugin contract.
 
 **Library model.** You pick which Shared Drives to include (Settings, or the
 menu-bar app). drivecast scans those drives **once** and caches a structured
@@ -12,11 +33,17 @@ catalogue to `library.json`. From then on, normal browsing is instant and
 hits the Google API **zero times** — tiles, seasons, episodes and posters all
 come off disk. A **Refresh** (manual or on launch) rescans and diffs: new titles
 are added (and their posters fetched), deleted titles are removed (and their
-orphaned posters pruned), and show episode lists are updated. A refresh is
-always a **complete** rescan — it walks every selected drive and rebuilds the
-whole catalogue (there is no per-drive / incremental refresh yet; the diffing
-only decides what changed, not what gets scanned). The raw folder-browser is
-still available behind a demoted **Browse files** link.
+orphaned posters pruned), and show episode lists are updated.
+
+**Per-drive refresh.** You usually know which drive you just uploaded to, so
+you don't have to rescan everything: hover a drive in **Settings** for its ⟳
+button, or use the menu-bar **Refresh one drive** submenu (the header ⟳ stays
+a full refresh). Under the hood every scan stores each drive's raw records in
+`data/scan_cache.json` and the library is rebuilt from the cache of **all**
+selected drives — so shows spanning two drives ("Part 1"/"Part 2") stay merged
+correctly no matter which drive you refresh. A drive whose scan errors keeps
+its previous titles instead of vanishing. The raw folder-browser is still
+available behind a demoted **Browse files** link.
 
 **Collection folders.** The scan recurses *into* folder trees, so a collection
 folder (`Phase 1`, `Hollywood`, `Blade Series`, `The Godfather Series`, …) that
@@ -246,8 +273,19 @@ Once `app.py` is running and the library opens in your browser:
    new titles, removes deleted ones, updates show episode lists, and backfills
    posters for any title still missing one (so enabling a TMDB key and hitting
    Refresh gives every existing tile a poster) — all without disturbing what
-   you're watching. Note a refresh always rescans **all** selected drives — you
-   can't refresh a single drive on its own yet.
+   you're watching. To refresh a **single drive** (you know where you just
+   uploaded), hover it in Settings for its ⟳ button, or use the menu-bar
+   **Refresh one drive** submenu.
+9. **Sections.** Assign drives to **Courses / Podcasts** (or a custom plugin section) with the
+   dropdown next to each included drive in Settings. Saving re-scans just the
+   drives whose section changed. Each section gets its own tab, accent colour
+   and layout (course progress rings, module/lesson naming, audiobook buttons,
+   channel tiles). Entertainment titles get **category chips** — Documentaries
+   are detected from TMDB genres, and titles TMDB doesn't know land under
+   *Other*. Optional per-drive hints live in `config.json` (`drive_hints`):
+   `{"<drive_id>": {"category": "documentary"}}` categorises a whole drive's
+   TMDB misses, and `{"<drive_id>": {"single_course": true}}` treats a drive
+   as ONE course whose root folders are modules.
 9. **Browse raw files (advanced).** The **Browse files** link still gives you the
    old live folder-by-folder browser over any drive, if you ever need it.
 
@@ -322,6 +360,8 @@ only — secrets go in `secrets/` (above).
 | `port`         | `8737`    | local port (bound to 127.0.0.1 only)                |
 | `page_size`    | `200`     | Drive files.list page size                          |
 | `selected_drives` | `[]`   | Shared Drive ids included in the library            |
+| `drive_sections` | `{}`    | drive id → `entertainment`\|`courses`\|`podcasts`\|custom |
+| `drive_hints`  | `{}`      | per-drive classifier hints (`category`, `single_course`) |
 | `auto_refresh_on_startup` | `false` | rescan the library on each launch        |
 | `scan_throttle` | `0.15`   | seconds to pause between scan API calls (quota)     |
 | `autoplay_next` | `true`   | auto-play the next episode when one finishes        |
@@ -335,8 +375,10 @@ secret — set it in `secrets/secrets.json`, not here.)
 All under `~/Library/Application Support/drivecast/data/` (persists across app
 rebuilds):
 
-- `library.json` — the cached catalogue (movie/show records, seasons,
+- `library.json` — the cached catalogue (movie/show/course records, seasons,
   episodes, poster paths); rebuilt by a scan/refresh
+- `scan_cache.json` — raw per-drive scan records; lets a per-drive refresh
+  rebuild the whole library without re-walking the other drives
 - `history.json` — resume positions & watched state, keyed by Drive file id
 - `tmdb_cache.json` — cached TMDB lookups (including negative results)
 - `posters/` — downloaded artwork: TMDB w342 posters, plus `dthumb_*.jpg`

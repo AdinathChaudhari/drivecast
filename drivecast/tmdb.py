@@ -32,10 +32,17 @@ class TMDB:
             with open(CACHE_PATH) as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                return data
+                return self._heal_cache(data)
         except (OSError, ValueError):
             pass
         return {}
+
+    @staticmethod
+    def _heal_cache(data):
+        """Drop positive entries cached before genre_ids existed so they get
+        refetched (once) with genres. None negative markers stay valid."""
+        return {k: v for k, v in data.items()
+                if v is None or (isinstance(v, dict) and "genre_ids" in v)}
 
     def _save_cache(self):
         with self._cache_lock:
@@ -105,6 +112,7 @@ class TMDB:
             "year": (top.get("release_date") or top.get("first_air_date") or "")[:4] or year,
             "poster_key": poster_key,
             "overview": top.get("overview") or None,
+            "genre_ids": top.get("genre_ids") or [],
         }
 
     async def _download_poster(self, poster_path, poster_key):

@@ -3,15 +3,51 @@
 
 const $ = (id) => document.getElementById(id);
 
+// The app is split into sections, each with its own tab, accent colour and
+// vocabulary. A drive is assigned to a section in Settings; unassigned =
+// entertainment (records carry `section`). These built-ins are only the
+// fallback — the real list (including any custom private section plugins) is
+// loaded from /api/sections at init.
+let SECTION_META = {
+  entertainment: { label: "Entertainment", icon: "🍿", continue: "Continue Watching",
+    lib: "Your Library",
+    empty: "No entertainment titles yet — assign drives in Settings and refresh." },
+  courses: { label: "Courses", icon: "🎓", accent: "#4ade80", accent2: "#86efac",
+    continue: "Continue Learning", lib: "Your Courses",
+    empty: "No course drive yet — assign one to Courses in Settings and it appears here.",
+    season: "Module", episode: "Lesson" },
+  podcasts: { label: "Podcasts", icon: "🎙", accent: "#c084fc", accent2: "#e0b3ff",
+    continue: "Continue Watching", lib: "Your Podcasts",
+    empty: "No podcast drive yet — assign one in Settings when you've added it." },
+};
+let SECTION_ORDER = Object.keys(SECTION_META);
+
+async function loadSections() {
+  try {
+    const data = await api("/api/sections");
+    const list = data.sections || [];
+    if (!list.length) return;
+    SECTION_META = {};
+    SECTION_ORDER = [];
+    for (const m of list) {
+      SECTION_META[m.key] = m;
+      SECTION_ORDER.push(m.key);
+    }
+  } catch (_) { /* fall back to the built-ins */ }
+}
+
 const state = {
   library: [],          // cached title records from /api/library
   byId: {},             // id -> record
-  filter: "all",        // all | movie | show
+  section: "entertainment", // active section tab
+  filter: "all",        // all | movie | show | documentary | other
   sort: "title",        // title | year | added | watched
   group: "none",        // none | type | drive
   query: "",            // client-side search over the library
   watchedMap: {},       // file_id -> last_played epoch (for "Recently watched")
+  progress: {},         // file_id -> {percent, watched} (lesson/episode progress)
   selectedDrives: [],
+  driveSections: {},    // drive_id -> section
   autoplayNext: true,   // autoplay next episode when one finishes
   // browse (advanced) sub-state
   drives: [],
@@ -22,6 +58,46 @@ const state = {
   nextPageToken: null,
   browseView: "drives", // drives | browse | search
 };
+
+function sectionOf(rec) { return rec.section || "entertainment"; }
+
+// Sections become visible the moment any drive is assigned away from
+// entertainment; until then the app looks exactly like it always did.
+function sectionsActive() {
+  return Object.values(state.driveSections || {}).some((s) => s && s !== "entertainment");
+}
+
+function setSection(sec) {
+  if (!SECTION_META[sec]) sec = "entertainment";
+  state.section = sec;
+  document.body.dataset.section = sec;
+  // Section accents come from the metadata (so custom plugin sections theme
+  // themselves); entertainment clears back to the stylesheet default.
+  const m = SECTION_META[sec] || {};
+  if (m.accent) {
+    document.body.style.setProperty("--accent", m.accent);
+    document.body.style.setProperty("--accent-2", m.accent2 || m.accent);
+  } else {
+    document.body.style.removeProperty("--accent");
+    document.body.style.removeProperty("--accent-2");
+  }
+  try { localStorage.setItem("dc.section", sec); } catch (_) {}
+}
+
+function renderTabs() {
+  const nav = $("sectionTabs");
+  if (!sectionsActive()) { show(nav, false); return; }
+  nav.innerHTML = "";
+  for (const sec of SECTION_ORDER) {
+    const m = SECTION_META[sec];
+    const a = document.createElement("a");
+    a.className = "section-tab" + (sec === state.section ? " active" : "");
+    a.innerHTML = `<span class="tab-icon">${m.icon}</span> ${m.label}`;
+    a.addEventListener("click", () => { location.hash = "#/s/" + sec; });
+    nav.appendChild(a);
+  }
+  show(nav, true);
+}
 
 // ---------- utilities ----------
 async function api(path, opts) {
@@ -86,19 +162,77 @@ function qualityPill(rec) {
 }
 
 // ---------- library tiles ----------
+function countEpisodes(rec) {
+  let n = 0;
+  for (const s of rec.seasons || []) n += (s.episodes || []).length;
+  return n;
+}
+
+// Fraction of a show/course's episodes marked watched (0..1).
+function courseProgress(rec) {
+  let total = 0, done = 0;
+  for (const s of rec.seasons || [])
+    for (const e of s.episodes || []) {
+      if (!e.file_id) continue;
+      total++;
+      if ((state.progress[e.file_id] || {}).watched) done++;
+    }
+  return total ? done / total : 0;
+}
+
+// CSS conic-gradient progress ring for course tiles (0..1); "" when untouched.
+function progressRing(p) {
+  if (!p) return "";
+  return `<span class="ring${p >= 1 ? " full" : ""}" style="--p:${Math.round(p * 100)}"
+    title="${Math.round(p * 100)}% complete"></span>`;
+}
+
+function mediaPill(rec) {
+  if (rec.media === "audio") return `<span class="pill">♪ audio</span>`;
+  if (rec.media === "mixed") return `<span class="pill">♪ + ▶</span>`;
+  return "";
+}
+
 function titleCard(rec) {
   const card = document.createElement("div");
   card.className = "card video";
   const p = posterMarkup(rec);
-  const badge = rec.type === "show"
-    ? `<span class="badge tv">TV</span>` : "";
-  const sub = rec.type === "show"
-    ? `${(rec.seasons || []).length} season${(rec.seasons || []).length === 1 ? "" : "s"}`
-    : (rec.year || "");
+  const sec = sectionOf(rec);
+  const isShow = rec.type === "show";
+  let badge = "", pill = "", sub = "";
+  // Movie-shaped records (loose files on a sections drive, or v1-migrated
+  // records pre-rescan) fall through to the plain movie subtitle.
+  if (sec === "courses" && isShow) {
+    const prog = courseProgress(rec);
+    pill = progressRing(prog);
+    if (prog >= 1) badge = `<span class="badge done">✓ Done</span>`;
+    const mods = (rec.seasons || []).length;
+    sub = mods > 1 ? `${mods} modules · ${countEpisodes(rec)} lessons`
+                   : `${countEpisodes(rec)} lessons`;
+  } else if (sec === "podcasts" && isShow) {
+    pill = mediaPill(rec);
+    sub = `${countEpisodes(rec)} episode${countEpisodes(rec) === 1 ? "" : "s"}`;
+  } else if (sec !== "entertainment" && isShow) {
+    // Custom plugin sections: media pill + counts in the section's own nouns.
+    pill = mediaPill(rec);
+    const n = nomen(rec);
+    const cnt = (rec.seasons || []).length;
+    sub = `${cnt} ${n.season.toLowerCase()}${cnt === 1 ? "" : "s"} · ` +
+          `${countEpisodes(rec)} ${n.episode.toLowerCase()}${countEpisodes(rec) === 1 ? "" : "s"}`;
+  } else if (sec !== "entertainment") {
+    pill = mediaPill(rec) || qualityPill(rec);
+    sub = rec.year || "";
+  } else {
+    badge = rec.type === "show" ? `<span class="badge tv">TV</span>` : "";
+    pill = qualityPill(rec);
+    sub = rec.type === "show"
+      ? `${(rec.seasons || []).length} season${(rec.seasons || []).length === 1 ? "" : "s"}`
+      : (rec.year || "");
+  }
   card.innerHTML = `
-    <div class="poster${p.cls}">${badge}${qualityPill(rec)}${p.html}</div>
+    <div class="poster${p.cls}">${badge}${pill}${p.html}</div>
     <div class="label">${escapeHTML(rec.title)}</div>
-    <div class="sub">${escapeHTML(sub)}</div>`;
+    <div class="sub">${escapeHTML(String(sub))}</div>`;
   card.addEventListener("click", () => { location.hash = "#/title/" + encodeURIComponent(rec.id); });
   return card;
 }
@@ -142,13 +276,36 @@ async function loadLibrary() {
   }
 }
 
+// Effective category: TMDB-derived when known, else the structural type
+// (movie/show), so libraries scanned without a TMDB key still filter sanely.
+function categoryOf(rec) {
+  return rec.category || (rec.type === "show" ? "show" : "movie");
+}
+
 function matchesFilter(rec) {
-  if (state.filter !== "all" && rec.type !== state.filter) return false;
+  if (sectionOf(rec) !== state.section) return false;
+  if (state.section === "entertainment" &&
+      state.filter !== "all" && categoryOf(rec) !== state.filter) return false;
   if (state.query) {
     const q = state.query.toLowerCase();
     if (!(rec.title || "").toLowerCase().includes(q)) return false;
   }
   return true;
+}
+
+// Update filter-chip labels with live counts ("Documentaries · 7"); chips for
+// empty categories are hidden (except All).
+function updateFilterChips(items) {
+  const counts = {};
+  for (const rec of items) counts[categoryOf(rec)] = (counts[categoryOf(rec)] || 0) + 1;
+  const labels = { all: "All", movie: "Movies", show: "TV Shows",
+                   documentary: "Documentaries", other: "Other" };
+  for (const chip of $("filters").children) {
+    const f = chip.dataset.filter;
+    const n = f === "all" ? items.length : (counts[f] || 0);
+    chip.textContent = n && f !== "all" ? `${labels[f]} · ${n}` : labels[f];
+    chip.classList.toggle("hidden", f !== "all" && !n && state.filter !== f);
+  }
 }
 
 // ---------- sorting / grouping (client-side over cached library) ----------
@@ -181,6 +338,15 @@ function sortItems(items) {
 function driveLabel(id) { return state.driveName[id] || id || "Unknown drive"; }
 
 function groupItems(items) {
+  // Non-entertainment sections group into shelves by default ("Python",
+  // "Audio Series", "Talks", ...) — the classifier sets rec.shelf.
+  if (state.section !== "entertainment" && state.group === "none") {
+    const map = {};
+    for (const r of items) (map[r.shelf || ""] = map[r.shelf || ""] || []).push(r);
+    const keys = Object.keys(map).sort((a, b) => a.localeCompare(b));
+    if (keys.length === 1) return [{ key: null, title: null, items }];
+    return keys.map((k) => ({ key: k || "_more", title: k || "More", items: map[k] }));
+  }
   if (state.group === "type") {
     const movies = items.filter((r) => r.type === "movie");
     const shows = items.filter((r) => r.type === "show");
@@ -200,9 +366,22 @@ function groupItems(items) {
 }
 
 function renderLibrary() {
+  // If sections were deactivated (all drives back on entertainment) while a
+  // non-entertainment section was active/persisted, the hidden tab bar would
+  // leave the library unreachable — snap back to entertainment.
+  if (!sectionsActive() && state.section !== "entertainment") setSection("entertainment");
+  renderTabs();
+  $("continueHead").textContent = SECTION_META[state.section].continue;
+  $("libHead").textContent = SECTION_META[state.section].lib;
   const grid = $("libGrid");
   grid.innerHTML = "";
   grid.className = "grid";
+  const inSection = state.library.filter((r) => sectionOf(r) === state.section);
+  show($("filters"), state.section === "entertainment");
+  if (state.section === "entertainment") {
+    updateFilterChips(inSection.filter((r) => !state.query ||
+      (r.title || "").toLowerCase().includes(state.query.toLowerCase())));
+  }
   let items = sortItems(state.library.filter(matchesFilter));
 
   // Empty states / call to action.
@@ -218,6 +397,14 @@ function renderLibrary() {
     showCta(`<h2>Library is empty</h2>
       <p>No titles cached yet. Run a refresh to scan your selected drives.</p>
       <button class="btn primary" onclick="triggerRefresh()">Refresh now</button>`);
+    return;
+  }
+  if (!inSection.length) {
+    show($("libSection"), false);
+    showCta(`<h2>${SECTION_META[state.section].icon || ""} Nothing here yet</h2>
+      <p>${escapeHTML(SECTION_META[state.section].empty ||
+        "Assign a drive to this section in Settings.")}</p>
+      <a class="btn primary" href="#/settings">Open Settings</a>`);
     return;
   }
   show($("cta"), false);
@@ -255,6 +442,7 @@ async function ensureWatchedMap() {
   try {
     const data = await api("/api/watched-map");
     state.watchedMap = data.map || {};
+    state.progress = data.progress || {};
   } catch (_) { /* non-fatal */ }
 }
 
@@ -274,7 +462,10 @@ function showCta(html) {
 async function loadContinue() {
   try {
     const data = await api("/api/continue");
-    const items = data.items || [];
+    // Scope the shelf to the active section (items from unknown/browse-played
+    // files count as entertainment).
+    const items = (data.items || []).filter(
+      (it) => (it.section || "entertainment") === state.section);
     const sec = $("continueSection");
     const row = $("continueRow");
     row.innerHTML = "";
@@ -312,8 +503,11 @@ async function pollScan() {
   const bar = $("scanBar");
   if (st.running) {
     show(bar, true);
-    bar.textContent = `Scanning drives… ${st.scanned}/${st.total}` +
-      (st.added ? ` · +${st.added} new` : "");
+    const names = st.scope_names || [];
+    const label = names.length && names.length <= 3
+      ? `Refreshing ${names.join(", ")}… ${st.scanned}/${st.total}`
+      : `Scanning drives… ${st.scanned}/${st.total}`;
+    bar.textContent = label + (st.added ? ` · +${st.added} new` : "");
   } else {
     clearInterval(scanTimer); scanTimer = null;
     $("refreshBtn").classList.remove("spinning");
@@ -333,20 +527,39 @@ async function openDetail(id) {
     try { rec = await api("/api/title/" + encodeURIComponent(id)); }
     catch (_) { body.innerHTML = `<div class="empty">Title not found.</div>`; return; }
   }
+  // Fresh progress so checkmarks / Resume-course / default module reflect
+  // what you just finished watching (not the page-load snapshot).
+  await ensureWatchedMap();
   if (rec.type === "show") renderShowDetail(rec);
   else renderMovieDetail(rec);
 }
 
+// Season/episode nouns for a record's section ("Module"/"Lesson", ...).
+function nomen(rec) {
+  const m = SECTION_META[sectionOf(rec)] || {};
+  return { season: m.season || "Season", episode: m.episode || "Episode" };
+}
+
 function detailHeader(rec) {
   const p = posterMarkup(rec);
+  const sec = sectionOf(rec);
+  const n = nomen(rec);
+  const count = (rec.seasons || []).length;
+  let subBits = [];
+  if (rec.year) subBits.push(String(rec.year));
+  if (rec.type === "show" && count)
+    subBits.push(`${count} ${n.season.toLowerCase()}${count === 1 ? "" : "s"}`);
+  if (sec === "courses") {
+    const prog = courseProgress(rec);
+    if (prog > 0) subBits.push(`${Math.round(prog * 100)}% complete`);
+  }
+  const pill = sec === "entertainment" ? qualityPill(rec) : mediaPill(rec);
   return `
     <div class="detail-hero">
-      <div class="detail-poster poster${p.cls}">${qualityPill(rec)}${p.html}</div>
+      <div class="detail-poster poster${p.cls}">${pill}${p.html}</div>
       <div class="detail-meta">
         <h1>${escapeHTML(rec.title)}</h1>
-        <div class="detail-sub">${rec.year || ""}${rec.type === "show"
-          ? " · " + (rec.seasons || []).length + " season" + ((rec.seasons || []).length === 1 ? "" : "s")
-          : ""}</div>
+        <div class="detail-sub">${escapeHTML(subBits.join(" · "))}</div>
         <p class="detail-overview">${escapeHTML(rec.overview || "")}</p>
         <div id="detailActions" class="detail-actions"></div>
       </div>
@@ -361,35 +574,59 @@ function renderMovieDetail(rec) {
   play.textContent = "Play";
   play.addEventListener("click", () => playFile(
     { id: rec.file_id, name: rec.title, drive_id: rec.drive_id, parent_id: rec.folder_id },
-    rec.duration_ms || null));
+    rec.duration_ms || null, false, [], rec.media || null));
   actions.appendChild(play);
 }
 
 function renderShowDetail(rec) {
+  const n = nomen(rec);
   $("detailBody").innerHTML = detailHeader(rec) + `
     <div class="season-select">
-      <label>Season</label>
+      <label>${escapeHTML(n.season)}</label>
       <select id="seasonSel"></select>
     </div>
-    <div id="episodeList" class="episodes"></div>`;
+    <div id="episodeList" class="episodes"></div>
+    <div id="materialsBox"></div>`;
 
-  // Shuffle: play every episode of the show in a random order (autoplay carries
-  // through the shuffled queue). Plus a small autoplay-status hint.
   const actions = $("detailActions");
-  const shuffleBtn = document.createElement("button");
-  shuffleBtn.className = "btn";
-  shuffleBtn.innerHTML = "⤨ Shuffle";
-  shuffleBtn.addEventListener("click", () => {
-    const eps = shuffle(allEpisodes(rec));
-    if (!eps.length) { toast("No episodes to shuffle."); return; }
-    toast(`Shuffling ${eps.length} episode${eps.length === 1 ? "" : "s"}`);
-    const first = eps[0];
-    const queue = eps.slice(1).map(queueItem);
-    playFile(
-      { id: first.file_id, name: first.name, drive_id: rec.drive_id, parent_id: first.parent_id },
-      first.duration_ms || null, true, queue);
-  });
-  actions.appendChild(shuffleBtn);
+  const sec = sectionOf(rec);
+  const eps = allEpisodes(rec);
+
+  if (sec === "courses") {
+    // Resume course: first unwatched lesson, queueing everything after it
+    // (across modules) so autoplay carries the whole course.
+    const next = eps.find((e) => !(state.progress[e.file_id] || {}).watched);
+    const resumeBtn = document.createElement("button");
+    resumeBtn.className = "btn primary";
+    resumeBtn.textContent = !next ? "Replay course"
+      : (next === eps[0] ? "Start course" : "Resume course");
+    resumeBtn.addEventListener("click", () => {
+      const start = next || eps[0];
+      if (!start) { toast("No lessons found."); return; }
+      const queue = eps.slice(eps.indexOf(start) + 1).map(queueItem);
+      playFile(
+        { id: start.file_id, name: start.name, drive_id: rec.drive_id, parent_id: start.parent_id },
+        start.duration_ms || null, false, queue, start.media || rec.media);
+    });
+    actions.appendChild(resumeBtn);
+  } else {
+    // Shuffle: play every episode in a random order (autoplay carries
+    // through the shuffled queue).
+    const shuffleBtn = document.createElement("button");
+    shuffleBtn.className = "btn";
+    shuffleBtn.innerHTML = "⤨ Shuffle";
+    shuffleBtn.addEventListener("click", () => {
+      const order = shuffle(eps);
+      if (!order.length) { toast("No episodes to shuffle."); return; }
+      toast(`Shuffling ${order.length} episode${order.length === 1 ? "" : "s"}`);
+      const first = order[0];
+      const queue = order.slice(1).map(queueItem);
+      playFile(
+        { id: first.file_id, name: first.name, drive_id: rec.drive_id, parent_id: first.parent_id },
+        first.duration_ms || null, true, queue, first.media || rec.media);
+    });
+    actions.appendChild(shuffleBtn);
+  }
   if (state.autoplayNext) {
     const hint = document.createElement("span");
     hint.className = "autoplay-hint";
@@ -402,17 +639,41 @@ function renderShowDetail(rec) {
   seasons.forEach((s, i) => {
     const opt = document.createElement("option");
     opt.value = String(i);
-    opt.textContent = s.season === 0 ? "Specials" : "Season " + s.season;
+    opt.textContent = s.name
+      ? s.name
+      : (s.season === 0 ? "Specials" : `${n.season} ${s.season}`);
     sel.appendChild(opt);
   });
-  // Default to the season of the in-progress episode, if any.
+  // Open on the season/module of the first unwatched episode (falls back to
+  // the first season).
+  let startIdx = 0;
+  const firstUnwatched = eps.find((e) => !(state.progress[e.file_id] || {}).watched);
+  if (firstUnwatched) {
+    const idx = seasons.findIndex((s) =>
+      (s.episodes || []).some((e) => e.file_id === firstUnwatched.file_id));
+    if (idx > 0) startIdx = idx;
+  }
+  sel.value = String(startIdx);
   sel.addEventListener("change", () => renderEpisodes(rec, seasons[+sel.value]));
-  renderEpisodes(rec, seasons[0]);
+  renderEpisodes(rec, seasons[startIdx]);
+  renderMaterials(rec);
 }
 
-// Minimal queue item {file_id, name, duration_ms} for the autoplay queue.
+// Course-level workbooks / PDFs, served through the streaming proxy.
+function renderMaterials(rec) {
+  const box = $("materialsBox");
+  if (!box) return;
+  const mats = rec.materials || [];
+  if (!mats.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<h3 class="materials-head">Materials</h3>` + mats.map((m) =>
+    `<a class="material" target="_blank" href="/stream/${encodeURIComponent(m.file_id)}">📄 ${escapeHTML(m.name)}</a>`
+  ).join("");
+}
+
+// Minimal queue item {file_id, name, duration_ms, media} for the autoplay queue.
 function queueItem(ep) {
-  return { file_id: ep.file_id, name: ep.name, duration_ms: ep.duration_ms || null };
+  return { file_id: ep.file_id, name: ep.name, duration_ms: ep.duration_ms || null,
+           media: ep.media || null };
 }
 
 // Every playable episode across all seasons, in order.
@@ -437,22 +698,45 @@ function renderEpisodes(rec, season) {
   const list = $("episodeList");
   list.innerHTML = "";
   if (!season) return;
+  const sec = sectionOf(rec);
+
+  // A volume/season ripped as a single audiobook file gets a one-tap play.
+  if (season.audiobook && season.audiobook.file_id) {
+    const ab = document.createElement("button");
+    ab.className = "btn audiobook-btn";
+    ab.textContent = `♪ Play ${season.name || "this volume"} as one audiobook`;
+    ab.addEventListener("click", () =>
+      playFile({ id: season.audiobook.file_id, name: season.audiobook.name,
+                 drive_id: rec.drive_id },
+               null, false, [], "audio"));
+    list.appendChild(ab);
+  }
+
   const eps = season.episodes;
   eps.forEach((ep, idx) => {
     const row = document.createElement("div");
     row.className = "episode";
-    const num = ep.episode != null ? `E${String(ep.episode).padStart(2, "0")}` : "";
+    const prog = state.progress[ep.file_id] || {};
+    if (prog.watched) row.classList.add("watched");
+    const num = ep.episode != null
+      ? (sec === "entertainment" ? `E${String(ep.episode).padStart(2, "0")}`
+                                 : String(ep.episode))
+      : "";
+    const mark = prog.watched ? `<span class="ep-done">✓</span>`
+      : (ep.media === "audio" ? `<span class="ep-audio">♪</span>` : "");
+    const pct = !prog.watched && prog.percent > 2
+      ? `<div class="progress"><span style="width:${Math.min(98, prog.percent)}%"></span></div>` : "";
     row.innerHTML = `
       <span class="ep-num">${num}</span>
       <span class="ep-title">${escapeHTML(ep.title || ep.name)}</span>
       <span class="ep-dur">${ep.duration_ms ? fmtTime(ep.duration_ms / 1000) : ""}</span>
-      <span class="ep-play">▶</span>`;
+      <span class="ep-play">${mark || "▶"}</span>${pct}`;
     row.addEventListener("click", () => {
       // Autoplay: queue the rest of this season after the clicked episode.
       const queue = eps.slice(idx + 1).filter((e) => e.file_id).map(queueItem);
       playFile(
         { id: ep.file_id, name: ep.name, drive_id: rec.drive_id, parent_id: ep.parent_id },
-        ep.duration_ms || null, false, queue);
+        ep.duration_ms || null, false, queue, ep.media || null);
     });
     list.appendChild(row);
   });
@@ -469,6 +753,8 @@ async function openSettings() {
   try { drives = (await api("/api/drives")).drives || []; }
   catch (e) { list.innerHTML = `<div class="empty">Could not list drives: ${escapeHTML(e.message)}</div>`; return; }
   const selected = new Set(settings.selected_drives || []);
+  const assigned = settings.drive_sections || {};
+  state.driveSections = assigned;
   $("autoRefresh").checked = !!settings.auto_refresh_on_startup;
   state.autoplayNext = settings.autoplay_next !== false;
   if ($("autoplayNext")) $("autoplayNext").checked = state.autoplayNext;
@@ -491,8 +777,49 @@ async function openSettings() {
     const label = document.createElement("label");
     label.className = "drive-row";
     label.innerHTML = `<input type="checkbox" value="${escapeHTML(d.id)}" ${selected.has(d.id) ? "checked" : ""}>
-      <span>${escapeHTML(d.name || d.id)}</span>`;
+      <span class="drive-name">${escapeHTML(d.name || d.id)}</span>`;
+    if (selected.has(d.id)) {
+      // Section assignment for included drives.
+      const sel = document.createElement("select");
+      sel.className = "drive-section";
+      sel.dataset.driveId = d.id;
+      for (const sec of SECTION_ORDER) {
+        const opt = document.createElement("option");
+        opt.value = sec;
+        opt.textContent = `${SECTION_META[sec].icon} ${SECTION_META[sec].label}`;
+        sel.appendChild(opt);
+      }
+      sel.value = SECTION_META[assigned[d.id]] ? assigned[d.id] : "entertainment";
+      label.appendChild(sel);
+
+      const btn = document.createElement("button");
+      btn.className = "drive-refresh";
+      btn.title = `Refresh only “${d.name || d.id}”`;
+      btn.textContent = "⟳";
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();          // inside a <label>: don't toggle the checkbox
+        e.stopPropagation();
+        refreshDrives([d.id], d.name || d.id);
+      });
+      label.appendChild(btn);
+    }
     list.appendChild(label);
+  }
+}
+
+// Kick a refresh scoped to specific drives (per-drive refresh).
+async function refreshDrives(ids, displayName) {
+  try {
+    const res = await api("/api/refresh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ drives: ids }),
+    });
+    if (res.running && !res.started) toast("A refresh is already running.");
+    else toast(`Refreshing ${displayName}…`);
+    startScanWatch();
+  } catch (e) {
+    toast("Refresh failed: " + e.message, "error");
   }
 }
 
@@ -500,16 +827,28 @@ async function saveSettings() {
   const selected = [...$("driveList").querySelectorAll("input:checked")].map((c) => c.value);
   const auto = $("autoRefresh").checked;
   const autoplay = $("autoplayNext") ? $("autoplayNext").checked : true;
+  // Collect section assignments (entertainment = default, no need to store).
+  // Skip drives the user just unchecked — their row still holds a select.
+  const driveSections = {};
+  for (const sel of $("driveList").querySelectorAll("select.drive-section")) {
+    const cb = sel.closest("label").querySelector("input[type=checkbox]");
+    if (cb && !cb.checked) continue;
+    if (sel.value && sel.value !== "entertainment") driveSections[sel.dataset.driveId] = sel.value;
+  }
   $("settingsMsg").textContent = "Saving…";
   try {
     const res = await api("/api/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ selected_drives: selected, auto_refresh_on_startup: auto, autoplay_next: autoplay, player: ($("playerSelect") || {}).value || "auto" }),
+      body: JSON.stringify({ selected_drives: selected, drive_sections: driveSections,
+        auto_refresh_on_startup: auto, autoplay_next: autoplay,
+        player: ($("playerSelect") || {}).value || "auto" }),
     });
     $("settingsMsg").textContent = "Saved.";
     state.selectedDrives = res.selected_drives || [];
+    state.driveSections = res.drive_sections || {};
     state.autoplayNext = res.autoplay_next !== false;
+    renderTabs();
     if (res.refresh_started) { toast("Drives changed — refreshing library…"); startScanWatch(); }
   } catch (e) {
     $("settingsMsg").textContent = "Save failed: " + e.message;
@@ -519,13 +858,14 @@ async function saveSettings() {
 // ---------- play ----------
 let pendingPlay = null;
 
-async function playFile(f, durationMs, skipResumeCheck, queue) {
+async function playFile(f, durationMs, skipResumeCheck, queue, media) {
   const fileId = f.id;
   const name = f.name;
   const durMs = durationMs || null;
   const driveId = f.drive_id || state.driveId;
   const parentId = f.parent_id || state.folderId;
   const q = queue || [];
+  const med = media || null;
 
   let resumeAt = 0;
   if (!skipResumeCheck) {
@@ -536,16 +876,16 @@ async function playFile(f, durationMs, skipResumeCheck, queue) {
     } catch (_) {}
   }
   if (resumeAt > 5 && !skipResumeCheck) {
-    pendingPlay = { fileId, name, durMs, driveId, parentId, queue: q };
+    pendingPlay = { fileId, name, durMs, driveId, parentId, queue: q, media: med };
     $("modalBody").textContent =
       `You were at ${fmtTime(resumeAt)}. Resume or start from the beginning?`;
     show($("modal"), true);
     return;
   }
-  await launch(fileId, name, durMs, driveId, parentId, false, q);
+  await launch(fileId, name, durMs, driveId, parentId, false, q, med);
 }
 
-async function launch(fileId, name, durMs, driveId, parentId, startOver, queue) {
+async function launch(fileId, name, durMs, driveId, parentId, startOver, queue, media) {
   try {
     const res = await api("/api/play", {
       method: "POST",
@@ -553,7 +893,7 @@ async function launch(fileId, name, durMs, driveId, parentId, startOver, queue) 
       body: JSON.stringify({
         file_id: fileId, name, duration_ms: durMs,
         drive_id: driveId, parent_id: parentId, start_over: !!startOver,
-        queue: queue || [],
+        queue: queue || [], media: media || null,
       }),
     });
     const from = res.resumed_from > 1 ? ` (resumed at ${fmtTime(res.resumed_from)})` : "";
@@ -575,11 +915,11 @@ function showVlcBanner() {
 
 $("btnResume").addEventListener("click", async () => {
   show($("modal"), false);
-  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, false, pendingPlay.queue);
+  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, false, pendingPlay.queue, pendingPlay.media);
 });
 $("btnStartOver").addEventListener("click", async () => {
   show($("modal"), false);
-  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, true, pendingPlay.queue);
+  if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, true, pendingPlay.queue, pendingPlay.media);
 });
 $("btnCancel").addEventListener("click", () => { show($("modal"), false); pendingPlay = null; });
 
@@ -733,7 +1073,15 @@ function router() {
   const mTitle = h.match(/^#\/title\/(.+)$/);
   const mBrowseFolder = h.match(/^#\/browse\/drive\/([^/]+)\/folder\/([^/]+)$/);
   const mBrowseDrive = h.match(/^#\/browse\/drive\/([^/]+)$/);
+  const mSection = h.match(/^#\/s\/(\w+)$/);
 
+  if (mSection) {
+    setSection(mSection[1]);
+    showView("library");
+    renderLibrary();
+    loadContinue();
+    return;
+  }
   if (mTitle) {
     openDetail(decodeURIComponent(mTitle[1]));
   } else if (h.startsWith("#/settings")) {
@@ -799,9 +1147,12 @@ function restoreControls() {
   try {
     const s = localStorage.getItem("dc.sort");
     const g = localStorage.getItem("dc.group");
+    const sec = localStorage.getItem("dc.section");
     if (s) state.sort = s;
     if (g) state.group = g;
-  } catch (_) {}
+    if (sec && SECTION_META[sec]) setSection(sec);
+    else setSection(state.section);
+  } catch (_) { setSection(state.section); }
   const ss = $("sortSel"), gs = $("groupSel");
   if (ss) ss.value = state.sort;
   if (gs) gs.value = state.group;
@@ -811,10 +1162,12 @@ async function loadPlaybackSettings() {
   try {
     const s = await api("/api/settings");
     state.autoplayNext = s.autoplay_next !== false;
+    state.driveSections = s.drive_sections || {};
   } catch (_) { /* non-fatal — defaults to on */ }
 }
 
 (async function init() {
+  await loadSections();
   restoreControls();
   await loadLibrary();
   await ensureWatchedMap();

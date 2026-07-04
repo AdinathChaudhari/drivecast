@@ -58,6 +58,30 @@ _EXTRAS_FOLDERS = {
     "sample", "samples", "subs", "subtitles", "trailers",
 }
 
+# Junk detection: files/folders that must never become library content.
+# AppleDouble twins ("._foo.mkv") carry REAL video mimetypes on Drive, so
+# name-based filtering is mandatory or every track/video shows up twice.
+_JUNK_TEXT_RE = re.compile(
+    r"demonoid|team-ftu|torrent[\s._-]*downloaded[\s._-]*from|freecoursesonline",
+    re.IGNORECASE)
+_JUNK_YTS_RE = re.compile(r"^www\.yts.*\.(?:jpe?g|png)$", re.IGNORECASE)
+_JUNK_FOLDER_RE = re.compile(r"^0?\.?\s*websites?\s+you\s+may\s+like$", re.IGNORECASE)
+
+# Course lesson numbering, tried in order (see lesson_number):
+#   "01) Hello.mp4" / "01. Hello" / "01 - Hello" / "1 – Hello"
+_LESSON_LEAD_RE = re.compile(r"^\s*(\d{1,3})\s*[).\-–]")
+#   combined lessons "2,3 - Foo" -> 2
+_LESSON_COMBINED_RE = re.compile(r"^\s*(\d{1,3}),\d+\s*-")
+#   letter sub-numbering "3 a - Foo" -> 3
+_LESSON_LETTER_RE = re.compile(r"^\s*(\d{1,3})\s+[a-c]\s*-", re.IGNORECASE)
+#   "MasterClass 12", "EP 3" / "EP3", "Episode 7"
+_LESSON_MASTERCLASS_RE = re.compile(r"\bmasterclass\s+(\d{1,3})\b", re.IGNORECASE)
+_LESSON_EP_RE = re.compile(r"\bEP\s*(\d{1,3})\b", re.IGNORECASE)
+
+# Bracketed release-site prefixes on course folders, e.g.
+# "[FreeCoursesOnline.Me] Coding Interview Bootcamp".
+_SITE_PREFIX_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)+")
+
 # A leading enumeration prefix on a folder/file name, e.g. "01) ", "01.", "1 - ".
 # Two safe forms only:
 #   * digits + a )./- separator surrounded by spaces:  "01) X", "1 - X", "1. X"
@@ -70,6 +94,60 @@ _ENUM_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3}\s*[).\-]\s+|\d{1,3}\.(?=[A-Za-z]))
 def is_extras_folder(name):
     """True if a folder name denotes bonus material (featurettes/extras/...)."""
     return (name or "").strip().lower() in _EXTRAS_FOLDERS
+
+
+def is_junk(name):
+    """True for files/folders that must never become library content.
+
+    Catches macOS AppleDouble twins ("._x.mkv" — these carry real video
+    mimetypes on Drive!), .DS_Store, .url shortcuts, torrent-site ad files,
+    "www.YTS*.jpg" cover spam, and "Websites you may like" folders.
+    """
+    n = (name or "").strip()
+    if not n:
+        return False
+    if n.startswith("._") or n == ".DS_Store":
+        return True
+    if n.lower().endswith(".url"):
+        return True
+    if _JUNK_YTS_RE.match(n):
+        return True
+    if _JUNK_FOLDER_RE.match(n):
+        return True
+    return bool(_JUNK_TEXT_RE.search(n))
+
+
+def lesson_number(name):
+    """Return a course-lesson ordering number from a filename, else None.
+
+    Recognises "01) X", "01. X", "1 - X", "1 – X", combined "2,3 - X" (-> 2),
+    letter sub-numbered "3 a - X" (-> 3), "MasterClass 12", "EP3"/"EP 10" and
+    "Episode 7". Numbers above 999 are rejected — they're timestamps
+    ("1576544307-cv_complete.pdf"), not lesson numbers.
+    """
+    if not name:
+        return None
+    base = strip_ext(name)
+    for rx in (_LESSON_COMBINED_RE, _LESSON_LETTER_RE, _LESSON_LEAD_RE,
+               _LESSON_MASTERCLASS_RE, _LESSON_EP_RE, _EPISODE_WORD_RE):
+        m = rx.search(base) if rx in (_LESSON_MASTERCLASS_RE, _LESSON_EP_RE,
+                                      _EPISODE_WORD_RE) else rx.match(base)
+        if m:
+            n = int(m.group(1))
+            return n if n <= 999 else None
+    return None
+
+
+def clean_course_title(name):
+    """Human display title for a course folder/drive name.
+
+    Strips bracketed release-site prefixes ("[FreeCoursesOnline.Me] ...") and
+    normalises underscores/whitespace, keeping the original casing otherwise.
+    """
+    n = _SITE_PREFIX_RE.sub("", name or "")
+    n = re.sub(r"[_]+", " ", n)
+    n = re.sub(r"\s+", " ", n).strip(" -_.")
+    return n or (name or "").strip()
 
 
 def strip_enum_prefix(name):

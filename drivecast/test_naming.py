@@ -228,3 +228,54 @@ def test_season_parsers_ignore_quality_noise():
         "Blackadder (1983) Season 1 S01 (576p DVD x265 HEVC 10bit AAC 2.0 Panda)"
     ) == ("Blackadder", 1)
     assert naming.split_season_suffix("Blackadder (1983) Specials") == ("Blackadder", 0)
+
+
+@pytest.mark.parametrize("name,junk", [
+    ("._Ashtavakra 01.mp3", True),          # AppleDouble twin
+    (".DS_Store", True),
+    ("Course link.url", True),
+    ("Demonoid.txt", True),
+    ("[Team-FTU].txt", True),
+    ("Torrent Downloaded From xyz.txt", True),
+    ("Torrent_Downloaded_From.txt", True),
+    ("www.YTS.MX.jpg", True),
+    ("0. Websites you may like", True),
+    ("Websites you may like", True),
+    ("Iron.Man.2008.mkv", False),
+    ("01) Hello Python.mp4", False),
+    ("Cover.jpg", False),
+    ("", False),
+])
+def test_is_junk(name, junk):
+    assert naming.is_junk(name) is junk
+
+
+@pytest.mark.parametrize("name,num", [
+    ("01) Hello Python.mp4", 1),
+    ("14) Loop Data Structures Part 2.mp4", 14),
+    ("01. Introduction.mp4", 1),
+    ("1 - Tactical Empathy.mp4", 1),
+    ("1 – Tactical Empathy.mp4", 1),     # en-dash
+    ("2,3 - Combined Lessons.mp4", 2),
+    ("3 a - Sub Lesson.mp4", 3),
+    ("Chris Voss MasterClass 12.mp4", 12),
+    ("EP3 Some Topic.mp4", 3),
+    ("EP 10 Some Topic.mp4", 10),
+    ("Episode 7 - Deep Dive.mp4", 7),
+    ("00.Class Workbook.pdf", 0),
+    ("1576544307-cv_complete.pdf", None),    # timestamp, not a lesson
+    ("Conclusion.mp4", None),
+    ("2 Fast 2 Furious.mp4", None),
+])
+def test_lesson_number(name, num):
+    assert naming.lesson_number(name) == num
+
+
+@pytest.mark.parametrize("raw,clean", [
+    ("[FreeCoursesOnline.Me] Coding Interview Bootcamp", "Coding Interview Bootcamp"),
+    ("[FCO] [Udemy] Python_Course", "Python Course"),
+    ("Art_of_Negotiation", "Art of Negotiation"),
+    ("Plain Course Name", "Plain Course Name"),
+])
+def test_clean_course_title(raw, clean):
+    assert naming.clean_course_title(raw) == clean

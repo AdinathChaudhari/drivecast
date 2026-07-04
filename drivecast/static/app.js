@@ -855,13 +855,19 @@ async function renderRemoteBlock() {
   if (!urls.length) {
     list.innerHTML = `<p class="muted">Save and restart drivecast — your address appears here once remote access is live.</p>`;
   } else {
-    for (const u of urls) {
+    urls.forEach((u, i) => {
       const a = document.createElement("a");
-      a.className = "remote-url";
+      a.className = "remote-url" + (i === 0 ? " active" : "");
       a.href = u.url;
       a.innerHTML = `<span class="remote-url-label">${escapeHTML(u.label)}</span>${escapeHTML(u.url)}`;
+      // Tap a row to show ITS QR (e.g. Wi-Fi for a guest without Tailscale).
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        $("remoteQr").src = "/api/remote/qr?label=" + encodeURIComponent(u.label) + "&_=" + Date.now();
+        for (const row of list.children) row.classList.toggle("active", row === a);
+      });
       list.appendChild(a);
-    }
+    });
   }
   const qr = $("remoteQr");
   if (urls.length) {

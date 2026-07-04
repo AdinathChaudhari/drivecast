@@ -513,6 +513,7 @@ def test_settings_enable_remote_generates_token_and_flags_restart(client):
 # ---- /api/remote + /api/remote/qr ----
 
 def test_remote_endpoint_lists_tailscale_first(client, monkeypatch):
+    monkeypatch.setattr(server_mod, "_tailscale_serve_url", lambda port: None)
     monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: "100.101.102.103")
     monkeypatch.setattr(server_mod, "_lan_ip", lambda: "192.168.1.50")
     client.post("/api/settings", json={"remote_access": True})
@@ -540,6 +541,7 @@ def test_remote_qr_serves_svg(client, monkeypatch):
 
 
 def test_remote_qr_404_when_no_ip(client, monkeypatch):
+    monkeypatch.setattr(server_mod, "_tailscale_serve_url", lambda port: None)
     monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: None)
     monkeypatch.setattr(server_mod, "_lan_ip", lambda: None)
     client.post("/api/settings", json={"remote_access": True})
@@ -591,3 +593,18 @@ def test_serve_url_parses_status_output(monkeypatch):
     monkeypatch.setattr(server_mod.subprocess, "run", lambda *a, **k: _P())
     assert server_mod._tailscale_serve_url(8737) == "https://mac.tailnet.ts.net"
     assert server_mod._tailscale_serve_url(9999) is None   # different port
+
+
+def test_remote_qr_label_selects_url(client, monkeypatch):
+    monkeypatch.setattr(server_mod, "_tailscale_serve_url",
+                        lambda port: "https://mac.tailnet.ts.net")
+    monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: "100.1.2.3")
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: "192.168.1.9")
+    client.app.state.dc.cfg["remote_access"] = True
+    client.app.state.dc.cfg["remote_token"] = "tok123"
+    # default = best (HTTPS); an explicit label picks that URL; unknown -> default
+    for label, code in ((None, 200), ("Wi-Fi", 200), ("wi-fi", 200), ("nope", 200)):
+        url = "/api/remote/qr" + (("?label=" + label) if label else "")
+        r = client.get(url)
+        assert r.status_code == code
+        assert r.headers["content-type"].startswith("image/svg")

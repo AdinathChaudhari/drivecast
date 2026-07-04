@@ -578,20 +578,22 @@ def create_app(cfg=None):
         }
 
     @app.get("/api/remote/qr")
-    async def api_remote_qr():
+    async def api_remote_qr(label: str = None):
+        """QR for a connection URL. `label` picks one of /api/remote's urls
+        (e.g. "Wi-Fi" for a guest device without Tailscale); default = best."""
         state = app.state.dc
         if not state.cfg.get("remote_access"):
             return JSONResponse({"error": "remote_disabled"}, status_code=404)
-        port = int(state.cfg.get("port", 8737))
-        token = state.cfg.get("remote_token") or ""
-        serve_url = _tailscale_serve_url(port)
-        if serve_url:
-            url = "%s/?token=%s" % (serve_url, token)
-        else:
-            ip = _tailscale_ip() or _lan_ip()
-            if not ip:
-                return JSONResponse({"error": "no_url"}, status_code=404)
-            url = _remote_url(ip, port, token)
+        urls = (await api_remote())["urls"]
+        if not urls:
+            return JSONResponse({"error": "no_url"}, status_code=404)
+        url = urls[0]["url"]
+        if label:
+            want = label.strip().lower()
+            for u in urls:
+                if u["label"].lower() == want:
+                    url = u["url"]
+                    break
         import qrcode
         import qrcode.image.svg
         img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage)

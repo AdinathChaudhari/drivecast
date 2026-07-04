@@ -396,6 +396,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: #d6d6dc; }
   color: var(--accent); text-decoration: none; font-size: 13px; word-break: break-all;
 }
 .remote-url:hover { border-color: var(--accent); }
+.remote-url.active { border-color: var(--accent); }
 .remote-url-label {
   display: inline-block; margin-right: 8px; padding: 1px 8px; border-radius: 999px;
   background: rgba(255,255,255,0.08); color: var(--muted);

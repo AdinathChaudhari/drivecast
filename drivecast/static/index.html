@@ -115,6 +115,10 @@
           <input type="checkbox" id="subtitlesOn">
           <span>English subtitles when available <span class="muted">(sibling .srt on the drive, or OpenSubtitles with an API key in secrets)</span></span>
         </label>
+        <label class="toggle">
+          <input type="checkbox" id="keepAwake">
+          <span>Keep Mac awake while streaming <span class="muted">(holds a caffeinate assertion during active streams; works in clamshell)</span></span>
+        </label>
         <div class="setting-row">
           <label for="playerSelect"><strong>Video player</strong></label>
           <select id="playerSelect">
@@ -223,6 +227,19 @@
         <button id="chooserCancel" class="btn ghost">Cancel</button>
       </div>
       <p class="muted chooser-note">Resume isn't tracked in external apps.</p>
+    </div>
+  </div>
+
+  <!-- "Are you still watching?" — keep-awake prompt before the Mac sleeps -->
+  <div id="awakeModal" class="modal hidden">
+    <div class="modal-card">
+      <h3>Are you still watching?</h3>
+      <p>The Mac is about to sleep in <span id="awakeCountdown" class="awake-countdown">0</span>s.
+        Keep it awake to continue streaming?</p>
+      <div class="modal-actions">
+        <button id="awakeYes" class="btn primary">Yes, keep watching</button>
+        <button id="awakeNo" class="btn ghost">No</button>
+      </div>
     </div>
   </div>
 

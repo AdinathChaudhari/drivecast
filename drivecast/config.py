@@ -47,6 +47,9 @@ DEFAULTS = {
     "auto_refresh_on_startup": False,  # rescan the library each launch
     "scan_throttle": 0.15,            # seconds to pause between scan API calls
     "autoplay_next": True,            # auto-play the next episode when one finishes
+    # Hold a macOS power assertion (caffeinate) while any stream is active, so a
+    # lid-closed/clamshell Mac doesn't sleep and kill remote playback.
+    "keep_awake": True,
     # Remote access (opt-in): when enabled the server binds to the LAN/tailnet
     # instead of loopback and every non-local request must carry the secret
     # token. Both keys are non-secret and auto-saved (the token is generated on

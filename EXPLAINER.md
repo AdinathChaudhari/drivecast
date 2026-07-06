@@ -282,6 +282,28 @@ the TV. And since the app reports progress through the same `/api/progress`
 calls as the web player, the TV, the phone and the Mac all share one Continue
 Watching shelf.
 
+### Keeping the Mac awake (only while it matters)
+
+Remote playback surfaced a physical problem: the Mac is the relay, and a
+sleeping relay kills the stream. The lazy fix — never let the Mac sleep — is
+wrong for a laptop, so drivecast scopes it tightly. Every active `/stream`
+response holds a reference on a little power-assertion manager
+(`drivecast/awake.py`); while the count is above zero, a `caffeinate` child
+keeps the system awake — but **only when the Mac reports AC power**, checked
+via `pmset` about once a minute (not trusted to `caffeinate -s`, whose own AC
+detection misses some passthrough-charging hubs). On battery the manager
+simply stands down: streaming never drains an unplugged laptop.
+
+When the last stream stops, the assertion isn't dropped instantly — that
+would flap on every seek and episode gap. Instead a small state machine runs:
+**2 minutes of grace**, then a **30-second prompt window** during which any
+client (web tab or TV app) can show *"Are you still watching?"* — answering
+yes (`POST /api/awake/extend`) buys another 2 minutes, answering no
+(`POST /api/awake/release`) or staying silent lets the Mac sleep naturally.
+Clients read the phase from `GET /api/awake/status`; the machinery is
+client-agnostic on purpose, so every screen gets the Netflix-style prompt
+from the same three endpoints.
+
 ---
 
 ## 6. The library cache (and browsing, search, posters)

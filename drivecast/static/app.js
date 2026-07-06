@@ -798,6 +798,7 @@ async function openSettings() {
   state.autoplayNext = settings.autoplay_next !== false;
   if ($("autoplayNext")) $("autoplayNext").checked = state.autoplayNext;
   if ($("subtitlesOn")) $("subtitlesOn").checked = settings.subtitles !== false;
+  if ($("keepAwake")) $("keepAwake").checked = settings.keep_awake !== false;
   if ($("remoteAccess")) {
     $("remoteAccess").checked = !!settings.remote_access;
     show($("remoteRestartNote"), false);
@@ -946,6 +947,7 @@ async function saveSettings() {
       body: JSON.stringify({ selected_drives: selected, drive_sections: driveSections,
         auto_refresh_on_startup: auto, autoplay_next: autoplay,
         subtitles: $("subtitlesOn") ? $("subtitlesOn").checked : true,
+        keep_awake: $("keepAwake") ? $("keepAwake").checked : true,
         remote_access: $("remoteAccess") ? $("remoteAccess").checked : false,
         player: ($("playerSelect") || {}).value || "auto" }),
     });
@@ -968,6 +970,7 @@ async function saveSettings() {
 let pendingPlay = null;
 
 async function playFile(f, durationMs, skipResumeCheck, queue, media) {
+  markPlaybackStarted();   // this client is now watching -> arm keep-awake polling
   const fileId = f.id;
   const name = f.name;
   const durMs = durationMs || null;
@@ -1080,6 +1083,7 @@ function playInWebPlayer(fileId, name, resumeAt) {
 }
 
 function openWebPlayer({ fileId, name, resumeAt, queue, media }) {
+  markPlaybackStarted();   // web player counts as watching too
   stopProgressTimer();   // a rapid double-tap must not leak the old interval
   wp = { fileId, name, media: media || null, queue: queue || [],
          resumeAt: resumeAt || 0, duration: null, timer: null };
@@ -1437,6 +1441,87 @@ async function loadPlaybackSettings() {
     state.driveSections = s.drive_sections || {};
   } catch (_) { /* non-fatal — defaults to on */ }
 }
+
+// ---------- keep-awake: "Are you still watching?" ----------
+// drivecast holds the Mac awake while streaming (see awake.py). When streams
+// stop it enters a 120s grace, then a 30s prompt window before releasing. If
+// this client started playback this session, poll the server's phase and pop a
+// countdown modal during the prompt so the viewer can keep the Mac awake.
+const awakeWatch = { started: false, showing: false, remaining: 0,
+                     pollTimer: null, countdownTimer: null };
+
+function markPlaybackStarted() {
+  awakeWatch.started = true;
+  ensureAwakePolling();
+}
+
+function ensureAwakePolling() {
+  if (!awakeWatch.started || document.hidden) return;
+  if (awakeWatch.pollTimer) return;   // already scheduled/running
+  pollAwake();                        // poll immediately, then reschedule itself
+}
+
+function stopAwakePolling() {
+  if (awakeWatch.pollTimer) { clearTimeout(awakeWatch.pollTimer); awakeWatch.pollTimer = null; }
+}
+
+async function pollAwake() {
+  awakeWatch.pollTimer = null;
+  if (!awakeWatch.started || document.hidden) return;
+  let st = null;
+  try { st = await api("/api/awake/status"); } catch (_) {}
+  let delay = 15000;   // default cadence
+  if (st) {
+    if (st.phase === "prompt") {
+      showAwakeModal(st);
+      delay = 5000;                    // tighten while the prompt is up
+    } else {
+      hideAwakeModal();                // phase left prompt -> auto-dismiss
+      // Tighten as the grace window runs low so we don't miss the prompt.
+      if (st.phase === "grace" && st.seconds_left != null && st.seconds_left < 40) delay = 5000;
+    }
+  }
+  awakeWatch.pollTimer = setTimeout(pollAwake, delay);
+}
+
+function showAwakeModal(st) {
+  const el = $("awakeModal");
+  if (!el) return;
+  awakeWatch.remaining = Math.max(0, Math.round(st.seconds_left || 0));
+  $("awakeCountdown").textContent = awakeWatch.remaining;
+  if (awakeWatch.showing) return;
+  awakeWatch.showing = true;
+  show(el, true);
+  // Local 1s countdown between polls; the 5s poll re-syncs the value.
+  if (awakeWatch.countdownTimer) clearInterval(awakeWatch.countdownTimer);
+  awakeWatch.countdownTimer = setInterval(() => {
+    awakeWatch.remaining -= 1;
+    if (awakeWatch.remaining <= 0) { hideAwakeModal(); return; }
+    $("awakeCountdown").textContent = awakeWatch.remaining;
+  }, 1000);
+}
+
+function hideAwakeModal() {
+  if (!awakeWatch.showing) return;
+  awakeWatch.showing = false;
+  show($("awakeModal"), false);
+  if (awakeWatch.countdownTimer) { clearInterval(awakeWatch.countdownTimer); awakeWatch.countdownTimer = null; }
+}
+
+if ($("awakeYes")) $("awakeYes").addEventListener("click", async () => {
+  hideAwakeModal();
+  try { await api("/api/awake/extend", { method: "POST" }); } catch (_) {}
+  ensureAwakePolling();
+});
+if ($("awakeNo")) $("awakeNo").addEventListener("click", async () => {
+  hideAwakeModal();
+  try { await api("/api/awake/release", { method: "POST" }); } catch (_) {}
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { stopAwakePolling(); hideAwakeModal(); }
+  else ensureAwakePolling();
+});
 
 (async function init() {
   await loadSections();

@@ -418,6 +418,49 @@ def test_settings_roundtrips_subtitles(client):
     assert client.get("/api/settings").json()["subtitles"] is False
 
 
+def test_settings_roundtrips_keep_awake(client):
+    # Default is on; POST toggles it off and GET reflects the change. The live
+    # KeepAwake reads the same cfg, so the toggle takes effect immediately.
+    assert config_mod.DEFAULTS["keep_awake"] is True
+    assert client.get("/api/settings").json()["keep_awake"] is True
+    r = client.post("/api/settings", json={"keep_awake": False})
+    assert r.status_code == 200
+    assert r.json()["keep_awake"] is False
+    assert client.get("/api/settings").json()["keep_awake"] is False
+    assert client.app.state.dc.cfg["keep_awake"] is False
+
+
+# ---- keep-awake status / extend / release ----
+
+def test_awake_status_shape(client):
+    r = client.get("/api/awake/status")
+    assert r.status_code == 200
+    st = r.json()
+    assert set(st) == {"active", "holding", "phase", "seconds_left"}
+    assert st["phase"] == "idle" and st["active"] == 0 and st["holding"] is False
+
+
+def test_awake_extend_release_roundtrip(client):
+    awake = client.app.state.dc.awake
+    awake._ac_check = lambda: True          # avoid shelling pmset in tests
+    awake.acquire()                         # active (held)
+    awake.release()                         # -> grace (still held)
+    assert client.get("/api/awake/status").json()["phase"] == "grace"
+    # Yes, keep watching: a fresh grace, returned as the new status.
+    assert client.post("/api/awake/extend").json()["phase"] == "grace"
+    # No: drop to idle immediately.
+    assert client.post("/api/awake/release").json()["phase"] == "idle"
+    assert client.get("/api/awake/status").json()["phase"] == "idle"
+
+
+def test_awake_endpoints_require_token_for_remote(make_client):
+    # No exemptions in the middleware: a remote client without a token is 401.
+    with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
+        assert c.get("/api/awake/status").status_code == 401
+        assert c.post("/api/awake/extend").status_code == 401
+        assert c.post("/api/awake/release").status_code == 401
+
+
 # ==========================================================================
 # Remote access: config, auth middleware, /api/remote(/qr), /api/progress.
 # ==========================================================================

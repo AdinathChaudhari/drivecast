@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from . import config as config_mod
 from . import localcert
 from . import naming
+from .awake import KeepAwake
 from .drive_api import DriveAPI, DriveAPIError
 from .history import History
 from .library import Library, Scanner
@@ -40,7 +41,10 @@ class AppState:
         self.cfg = cfg
         self.tokens = TokenManager(cfg["remote"])
         self.api = DriveAPI(self.tokens, self.tokens.list_drives)
-        self.streamer = Streamer(self.tokens, self.api)
+        # Hold a power assertion while streams are active (clamshell sleep would
+        # otherwise kill remote playback). Reads the live config toggle.
+        self.awake = KeepAwake(enabled=lambda: bool(self.cfg.get("keep_awake", True)))
+        self.streamer = Streamer(self.tokens, self.api, keepawake=self.awake)
         self.history = History()
         self.tmdb = TMDB(cfg.get("tmdb_api_key"))
         self.library = Library(drive_sections=cfg.get("drive_sections") or {})
@@ -116,6 +120,7 @@ class AppState:
             self.history.flush()
         except Exception:
             pass
+        self.awake.shutdown()
         await self.api.aclose()
         await self.streamer.aclose()
         await self.tmdb.aclose()
@@ -343,6 +348,7 @@ def create_app(cfg=None):
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "subtitles": bool(state.cfg.get("subtitles", True)),
+            "keep_awake": bool(state.cfg.get("keep_awake", True)),
             "player": state.cfg.get("player", "auto"),
             "available_players": available,
             "remote_access": bool(state.cfg.get("remote_access", False)),
@@ -386,6 +392,8 @@ def create_app(cfg=None):
             state.cfg["autoplay_next"] = bool(body.get("autoplay_next"))
         if "subtitles" in body:
             state.cfg["subtitles"] = bool(body.get("subtitles"))
+        if "keep_awake" in body:
+            state.cfg["keep_awake"] = bool(body.get("keep_awake"))
         if "player" in body:
             choice = str(body.get("player") or "auto")
             if choice in ("auto", "mpv", "iina", "vlc"):
@@ -414,6 +422,7 @@ def create_app(cfg=None):
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "subtitles": bool(state.cfg.get("subtitles", True)),
+            "keep_awake": bool(state.cfg.get("keep_awake", True)),
             "remote_access": bool(state.cfg.get("remote_access", False)),
             "restart_required": restart_required,
             "refresh_started": started,
@@ -428,6 +437,24 @@ def create_app(cfg=None):
             except DriveAPIError as e:
                 return _drive_error_response(e)
         return await state.streamer.stream(file_id, request)
+
+    # ---- keep-awake ("Are you still watching?") ----
+    # Behind the normal auth middleware (no exemptions): the TV app will adopt
+    # these later, so the status shape is deliberately client-agnostic.
+
+    @app.get("/api/awake/status")
+    async def api_awake_status():
+        return app.state.dc.awake.status()
+
+    @app.post("/api/awake/extend")
+    async def api_awake_extend():
+        """User said 'Yes, keep watching' — restart a fresh grace period."""
+        return app.state.dc.awake.extend()
+
+    @app.post("/api/awake/release")
+    async def api_awake_release():
+        """User said 'No' — drop the assertion now; the Mac may sleep."""
+        return app.state.dc.awake.release_now()
 
     @app.post("/api/play")
     async def api_play(request: Request):

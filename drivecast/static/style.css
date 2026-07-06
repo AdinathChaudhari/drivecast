@@ -304,6 +304,7 @@ h2 { font-size: 16px; font-weight: 600; margin: 0 0 14px; color: var(--text-2); 
 .modal-card h3 { margin: 0 0 8px; }
 .modal-card p { color: var(--muted); margin: 0 0 20px; }
 .modal-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+.awake-countdown { font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
 .btn {
   padding: 9px 18px; border-radius: 10px; cursor: pointer; font-size: 14px;
   background: var(--panel-2); color: var(--text); border: 1px solid var(--border);

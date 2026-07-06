@@ -60,9 +60,12 @@ async def _parse_error(resp):
 
 
 class Streamer:
-    def __init__(self, token_manager, drive_api):
+    def __init__(self, token_manager, drive_api, keepawake=None):
         self.tokens = token_manager
         self.api = drive_api
+        # Optional KeepAwake: acquired for the life of each streamed body so the
+        # Mac doesn't sleep mid-relay. None in contexts that don't need it.
+        self.keepawake = keepawake
         # One long-lived client: connection pooling / keep-alive across the many
         # Range requests a player makes while seeking, instead of a fresh TCP +
         # TLS handshake per request.
@@ -165,6 +168,11 @@ class Streamer:
                 pass
 
         async def body():
+            # Hold the Mac awake for as long as we're relaying bytes. The finally
+            # runs on normal completion, on client disconnect (GeneratorExit /
+            # aclose) and on seek-abort, so the reference is always released.
+            if self.keepawake is not None:
+                self.keepawake.acquire()
             try:
                 async for chunk in upstream.aiter_raw(CHUNK_SIZE):
                     yield chunk
@@ -176,6 +184,8 @@ class Streamer:
                 log.debug("stream error for %s: %r", file_id, exc)
                 raise
             finally:
+                if self.keepawake is not None:
+                    self.keepawake.release()
                 await upstream.aclose()
 
         return StreamingResponse(body(), status_code=status, headers=out_headers)

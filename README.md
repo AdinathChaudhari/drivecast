@@ -281,6 +281,36 @@ access instantly (lost phone, shared a link by mistake): set
 and restart — a fresh token is generated the next time you save Settings, and
 every old link, QR and cookie stops working immediately.
 
+### Keeping the Mac awake while streaming
+
+If the Mac sleeps mid-stream, playback on the phone/TV dies. So drivecast holds
+a macOS power assertion (`caffeinate -i -s`) for as long as something is
+streaming — acquired when a `/stream` response starts, dropped when it ends. It
+works lid-closed in **clamshell mode**. The toggle is **Keep Mac awake while
+streaming** in Settings (on by default).
+
+**On AC only.** The assertion is held *only while the Mac is on AC / passthrough
+charging* — never on battery, so it can't quietly drain a laptop that's unplugged.
+drivecast checks the power source itself (`pmset -g batt`) rather than trusting
+`caffeinate`'s own AC detection, which missed some passthrough-charging hubs; it
+re-checks about once a minute and drops the assertion the moment you switch to
+battery (and reclaims it if you plug back in while still streaming).
+
+**"Are you still watching?"** When streaming stops (or a paused client stops
+pulling bytes), drivecast doesn't cut the assertion instantly. It waits out a
+**2-minute grace** (so seeks and gaps between episodes don't flap it), then opens
+a **30-second countdown prompt** in any open drivecast tab: *Are you still
+watching?* Click **Yes, keep watching** to reset another 2-minute grace, or
+**No** to release right away. If you don't answer, the countdown lapses and the
+Mac is allowed to sleep naturally. Starting playback again at any point cancels
+the countdown.
+
+One caveat: even with the assertion held, macOS clamshell rules can still force
+the Mac to sleep if the **external display or power is disconnected** — that's
+the OS, outside drivecast's control. The nuclear option (outside drivecast's
+scope) is `sudo pmset -a disablesleep 1`, which disables sleep entirely until
+you set it back to `0`.
+
 ## Run
 
 ```sh

@@ -155,22 +155,22 @@ The redesign: **scan once, cache everything.**
 Real drives are organized in wildly inconsistent ways. Getting one clean tile per
 movie and one per show meant handling all of these:
 
-- **Movie folders**: `Your Name (2016)/movie.mkv` → one movie.
-- **Collection folders**: `Phase 1/01) Iron Man (2008)/movie.mkv`,
-  `Hollywood/...`, `Blade Series/...` → the scanner must **recurse into the tree
+- **Movie folders**: `Paper Lantern (2016)/movie.mkv` → one movie.
+- **Collection folders**: `Phase 1/01) Alloy Man (2008)/movie.mkv`,
+  `Hollywood/...`, `Dusk Series/...` → the scanner must **recurse into the tree
   until it finds actual films** and surface each as its own tile, ignoring
   bonus-material subfolders (`Featurettes`, `Extras`, …) and stripping enumeration
   prefixes like `01)`.
-- **Shows nested under a folder**: `The Office/Season 1/...` → one show.
+- **Shows nested under a folder**: `The Branch/Season 1/...` → one show.
 - **Shows whose seasons are separate top-level folders**:
-  `Blackadder Season 1 S01`, `Blackadder Season 2 S02` → grouped by shared prefix.
+  `Grimwold Season 1 S01`, `Grimwold Season 2 S02` → grouped by shared prefix.
 - **Whole drives that are one show** with bare `Season 1`, `Season 2` folders →
-  grouped under the drive's name (e.g. *Fraiser*).
+  grouped under the drive's name (e.g. *Quillson*).
 - **Shows split across two drives** (`… (Part 1)` / `(Part 2)`) → merged into one.
 - **Noisy season names**: `S01 (2017) 1080p 10bit HEVC NF WEBRip x265 [ENGLISH -
   SPANISH]` and `S05 Part 1 (2021) …` — quality junk had to be stripped before
-  the season number could be read (this was the *Money Heist* bug).
-- **Range-named wrappers**: `The Office Season 1-9 S01-s09` must be left intact,
+  the season number could be read (this was the *Vault Rush* bug).
+- **Range-named wrappers**: `The Branch Season 1-9 S01-s09` must be left intact,
   not mis-split into a bogus season.
 
 Every one of these was captured as a pure, unit-tested function operating on
@@ -259,7 +259,7 @@ design, implementation, and review, with models assigned by job.
 
 "I know which drive I just uploaded to — why rescan all 24?" The naive fix
 (rescan one drive, splice its records into the library) is subtly wrong: shows
-that span two drives (*Malcolm in the Middle (Part 1)/(Part 2)*) are merged into
+that span two drives (*Milo in the Muddle (Part 1)/(Part 2)*) are merged into
 a single grouped record that cannot be split back apart per-drive. The fix that
 is actually correct: every scan writes each drive's **raw, pre-merge records**
 into a sidecar cache (`scan_cache.json`); a scoped refresh re-walks only the
@@ -364,8 +364,8 @@ blocks on a lookup (bounded, failure-silent). Live-testing against the real
 OpenSubtitles API found two quirks unit tests could never catch: the search
 endpoint 301-redirects to a normalized URL (the client must follow), and the
 file host intermittently throws Cloudflare 520s (two quick retries land it).
-Verified with real downloads: a full *Shawshank Redemption* SRT and an
-episode-exact *Brooklyn Nine-Nine* S07E02 match.
+Verified with real downloads: a full SRT for a classic drama and an
+episode-exact *Dockside Nine-Nine* S07E02 match.
 
 ---
 
@@ -463,7 +463,7 @@ tiers:
 The loop that repeated for every feature:
 
 1. **Fable 5 investigates reality first** — it never guessed the Drive layout, it
-   went and listed the actual folders (Blackadder, Fraiser, Money Heist, MCU
+   went and listed the actual folders (Grimwold, Quillson, Vault Rush, Saga
    Phase 1) and read the real filenames. Grounding the design in real data is why
    the classifier handles so many odd cases.
 2. **Fable 5 writes a precise spec** — including the exact real-world examples and
@@ -471,7 +471,7 @@ The loop that repeated for every feature:
 3. **An Opus code-writer subagent implements it** — often several running in the
    background in parallel for independent pieces.
 4. **Verification is adversarial and real** — unit tests on synthetic data *plus*
-   a live scan of the actual drives to confirm (e.g. "Money Heist → one show,
+   a live scan of the actual drives to confirm (e.g. "Vault Rush → one show,
    seasons 1–5, poster resolved"), plus rebuilding the `.app` and booting it under
    a stripped PATH to prove the bundle works, not just the source.
 5. **Fable 5 integrates, fixes the gaps the subagent missed** (a stale doc note,
@@ -481,9 +481,9 @@ The loop that repeated for every feature:
 Notable moments that show the agentic workflow paying off:
 
 - The **season-grouping** feature: Fable 5 discovered from real data that "The
-  Office worked but Blackadder didn't" purely because of folder structure,
+  Branch worked but Grimwold didn't" purely because of folder structure,
   explained *why*, designed a grouping pass, had it implemented, and verified it
-  against the live drives — Blackadder collapsed from 5 tiles to 1 show.
+  against the live drives — Grimwold collapsed from 5 tiles to 1 show.
 - The **poster/quota bug**: Fable 5 traced "posters don't show" to the bundle
   reading config from *inside* the `.app` (no key, wiped on every rebuild), and
   fixed it by relocating everything to a stable user directory — a

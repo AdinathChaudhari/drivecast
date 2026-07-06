@@ -444,8 +444,8 @@ def classify_loose(drive_id, loose_files):
 
 # ------------------------------------------------------------- season grouping --
 
-# Drive-name noise to strip when a whole drive is one show (e.g. "TV | Blackadder",
-# "Movie // MCU", "Malcolm in the Middle (Part 1)").
+# Drive-name noise to strip when a whole drive is one show (e.g. "TV | Grimwold",
+# "Movie // Saga", "Milo in the Muddle (Part 1)").
 _DRIVE_PREFIX_RE = re.compile(r"^\s*(?:tv|movie|movies|show|shows)\s*[|/:\-]+\s*", re.IGNORECASE)
 _PART_SUFFIX_RE = re.compile(r"\s*[\(\[]?\s*part\s*\d+\s*[\)\]]?\s*$", re.IGNORECASE)
 

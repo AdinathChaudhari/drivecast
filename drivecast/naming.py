@@ -42,7 +42,7 @@ _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".m4v", ".wmv", ".flv", ".webm", 
 _SEASON_WORD_RE = re.compile(r"\b(?:season|series)\s*0*(\d+)\b", re.IGNORECASE)
 # A LEADING short season token: "S01", "S1", and also noisy release folders like
 # "S01 (2017) 1080p ..." or "S05 Part 1 (2021) ...". Anchored to the start so a
-# real title that merely contains an S-number mid-string (e.g. "Terminator 2")
+# real title that merely contains an S-number mid-string (e.g. "Resistor 2")
 # is never misread as a season.
 _SEASON_LEAD_RE = re.compile(r"^\s*s0*(\d+)\b", re.IGNORECASE)
 # Episode markers beyond SxxExx / NxNN.
@@ -93,9 +93,10 @@ _SITE_PREFIX_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)+")
 # A leading enumeration prefix on a folder/file name, e.g. "01) ", "01.", "1 - ".
 # Two safe forms only:
 #   * digits + a )./- separator surrounded by spaces:  "01) X", "1 - X", "1. X"
-#   * digits + a dot immediately before a letter:       "01.Iron Man"
-# This deliberately does NOT match real leading title numbers like "2 Fast 2
-# Furious" (a space, not a separator, follows the digit) or "300"/"1917".
+#   * digits + a dot immediately before a letter:       "01.Alloy Man"
+# This deliberately does NOT match real leading title numbers like "2 Quick 2
+# Quiet" (a space, not a separator, follows the digit) or all-digit titles
+# ("305"/"1913").
 _ENUM_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3}\s*[).\-]\s+|\d{1,3}\.(?=[A-Za-z]))")
 
 
@@ -208,7 +209,7 @@ def detect_episode(name):
 def extract_year(name):
     """Return a 4-digit year (1900-2099) as int, else None.
 
-    When several year-like tokens are present (e.g. "Blade Runner 2049 2017"),
+    When several year-like tokens are present (e.g. "Neon City 2049 2017"),
     the last one is almost always the release year, so we return that.
     """
     matches = _YEAR_RE.findall(name)
@@ -322,8 +323,8 @@ def _strip_folder_noise(name):
     """Remove bracketed groups and quality/release tokens from a folder name.
 
     Folder names in the wild carry junk like "Season 1 (480p DVD)" or
-    "Blackadder (1983) Season 1 S01 (576p DVD x265 ...)". Stripping it first lets
-    the season detectors see the real "Season 1" / "Blackadder Season 1 S01".
+    "Grimwold (1983) Season 1 S01 (576p DVD x265 ...)". Stripping it first lets
+    the season detectors see the real "Season 1" / "Grimwold Season 1 S01".
     """
     t = _BRACKETS_RE.sub(" ", name or "")
     t = _QUALITY_RE.sub(" ", t)
@@ -336,7 +337,7 @@ def pure_season(name):
     "Season 3" -> 3, "S03" -> 3, "Series 2" -> 2, "Specials" -> 0, and the same
     with trailing junk like "Season 1 (480p DVD)". Used to detect a drive whose
     top-level folders are bare seasons (the drive itself is the show). A name with
-    other real words (e.g. "Blackadder Season 1") is NOT pure.
+    other real words (e.g. "Grimwold Season 1") is NOT pure.
     """
     if not name:
         return None
@@ -355,10 +356,10 @@ def pure_season(name):
 def split_season_suffix(name):
     """Split "<Show> <season marker>" into (show_prefix, season_number).
 
-    "Blackadder Season 1 S01" -> ("Blackadder", 1); "Foo Season 2" -> ("Foo", 2);
+    "Grimwold Season 1 S01" -> ("Grimwold", 1); "Foo Season 2" -> ("Foo", 2);
     "Foo S02" -> ("Foo", 2); "Foo Specials" -> ("Foo", 0). Returns (None, None)
     when the name doesn't end in a single-season marker. A numeric RANGE like
-    "The Office Season 1-9 S01-s09" is rejected (it's a whole-series folder, not
+    "The Branch Season 1-9 S01-s09" is rejected (it's a whole-series folder, not
     one season), so such folders are left as their own record.
     """
     if not name:
@@ -414,7 +415,7 @@ def clean_title(name):
 def episode_title(name):
     """Best-effort episode name (the text after the SxxExx/NxNN marker), else None.
 
-    e.g. "Frasier (1993) - S05E10 - Where Every Bloke.mkv" -> "Where Every Bloke".
+    e.g. "Quillson (1993) - S05E10 - Where Every Kettle Sings.mkv" -> "Where Every Kettle Sings".
     """
     base = strip_ext(name)
     base = re.sub(r"[._]+", " ", base)
@@ -445,11 +446,11 @@ def parse(name):
     """
     raw = name
     base = strip_ext(name)
-    # Drop a leading enumeration prefix ("01) ", "01.Iron Man", "1 - ...") BEFORE
+    # Drop a leading enumeration prefix ("01) ", "01.Alloy Man", "1 - ...") BEFORE
     # separator normalisation, since normalising dots would erase the "01." signal.
     base = strip_enum_prefix(base)
     # Normalise separators first so word boundaries work even when the original
-    # used dots/underscores (e.g. "Game_of_Thrones_S01E01"). Brackets are kept
+    # used dots/underscores (e.g. "Grimwold_Chronicles_S01E01"). Brackets are kept
     # for now and removed from the title region below.
     base = re.sub(r"[._]+", " ", base)
 

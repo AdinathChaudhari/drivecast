@@ -46,11 +46,11 @@ def only(recs):
 
 
 def test_classify_single_movie_folder_titled_from_folder():
-    n = node("Your Name (2016) [BluRay] [1080p]",
-             [vid("v1", "Your.Name.2016.1080p.BluRay.mkv", size=5000, dur=360000)])
+    n = node("Paper Lantern (2016) [BluRay] [1080p]",
+             [vid("v1", "Paper.Lantern.2016.1080p.BluRay.mkv", size=5000, dur=360000)])
     rec = only(library.classify_node(n))
     assert rec["type"] == "movie"
-    assert rec["title"] == "Your Name"   # from the FOLDER name
+    assert rec["title"] == "Paper Lantern"   # from the FOLDER name
     assert rec["year"] == 2016
     assert rec["id"] == "v1"             # id == the video's file_id
     assert rec["file_id"] == "v1"
@@ -65,15 +65,15 @@ def test_leaf_folder_multiple_videos_expands_per_file():
     n = node("Double Feature", [
         vid("s", "Movie-sample.mkv", size=9999),        # sample: excluded
         vid("t", "Movie-trailer.mp4", size=8888),       # trailer: excluded
-        vid("a", "Mad Max Fury Road 2015 1080p.mkv", size=5000),
-        vid("b", "Sicario 2015 1080p.mkv", size=1000),
+        vid("a", "Dust Rider Iron Road 2015 1080p.mkv", size=5000),
+        vid("b", "Riverline 2015 1080p.mkv", size=1000),
     ])
     recs = library.classify_node(n)
     by_id = {r["file_id"]: r for r in recs}
     assert set(by_id) == {"a", "b"}          # only the two real videos
     assert all(r["type"] == "movie" for r in recs)
-    assert by_id["a"]["title"] == "Mad Max Fury Road"   # from the FILE name
-    assert by_id["b"]["title"] == "Sicario"
+    assert by_id["a"]["title"] == "Dust Rider Iron Road"   # from the FILE name
+    assert by_id["b"]["title"] == "Riverline"
 
 
 def test_empty_folder_returns_no_records():
@@ -87,14 +87,14 @@ def test_empty_folder_returns_no_records():
 def test_container_of_movie_folders_expands_to_one_tile_each():
     # A collection folder ("Phase 1") of enumerated single-movie subfolders must
     # become one tile per movie, NOT a single "Phase 1" tile.
-    iron = node("01) Iron Man (2008) [1080p]",
-                [vid("f1", "01.Iron Man (2008) 1080p.mkv")], fid="ironF")
-    hulk = node("02) The Incredible Hulk (2008) [1080p]",
-                [vid("f2", "02.The Incredible Hulk (2008) 1080p.mkv")], fid="hulkF")
-    phase = node("Phase 1", [], subfolders=[iron, hulk], fid="phaseF")
+    alloy = node("01) Alloy Man (2008) [1080p]",
+                [vid("f1", "01.Alloy Man (2008) 1080p.mkv")], fid="alloyF")
+    brute = node("02) The Colossal Brute (2008) [1080p]",
+                [vid("f2", "02.The Colossal Brute (2008) 1080p.mkv")], fid="bruteF")
+    phase = node("Phase 1", [], subfolders=[alloy, brute], fid="phaseF")
     recs = library.classify_node(phase)
     titles = {r["title"] for r in recs}
-    assert titles == {"Iron Man", "The Incredible Hulk"}
+    assert titles == {"Alloy Man", "The Colossal Brute"}
     assert "Phase 1" not in titles
     assert {r["file_id"] for r in recs} == {"f1", "f2"}
 
@@ -102,36 +102,36 @@ def test_container_of_movie_folders_expands_to_one_tile_each():
 def test_extras_subfolder_is_ignored():
     # A movie folder with a Featurettes extras subfolder is still one movie.
     extras = node("Featurettes", [vid("x", "Behind the scenes.mkv")], fid="exF")
-    movie = node("Blade - Trinity (2004) [1080p]",
-                 [vid("m", "Blade.Trinity.2004.1080p.mkv")],
-                 subfolders=[extras], fid="bladeF")
+    movie = node("Dusk - Rebirth (2004) [1080p]",
+                 [vid("m", "Dusk.Rebirth.2004.1080p.mkv")],
+                 subfolders=[extras], fid="duskF")
     rec = only(library.classify_node(movie))
     assert rec["type"] == "movie"
-    assert rec["title"] == "Blade - Trinity"
+    assert rec["title"] == "Dusk - Rebirth"
     assert rec["file_id"] == "m"
 
 
 def test_container_with_stray_videos_and_subfolders():
     # "Hollywood": loose movie files alongside a movie subfolder -> each is a tile.
-    sub = node("The Godfather (1972)",
-               [vid("g", "The.Godfather.1972.1080p.mkv")], fid="gfF")
+    sub = node("The Patriarch (1972)",
+               [vid("g", "The.Patriarch.1972.1080p.mkv")], fid="gfF")
     hollywood = node("Hollywood", [
-        vid("h1", "Whiplash 2014 1080p.mkv"),
-        vid("h2", "Sicario 2015 1080p.mkv"),
+        vid("h1", "Drumfire 2014 1080p.mkv"),
+        vid("h2", "Riverline 2015 1080p.mkv"),
     ], subfolders=[sub], fid="hwF")
     recs = library.classify_node(hollywood)
     titles = {r["title"] for r in recs}
-    assert titles == {"Whiplash", "Sicario", "The Godfather"}
+    assert titles == {"Drumfire", "Riverline", "The Patriarch"}
 
 
 def test_nested_containers_recurse_to_movies():
     # Container of a container of movie-folders.
-    inner_movie = node("Blade (1998) [1080p]",
-                       [vid("bl", "Blade.1998.1080p.mkv")], fid="blF")
-    blade_series = node("Blade Series", [], subfolders=[inner_movie], fid="bsF")
-    top = node("Hollywood", [], subfolders=[blade_series], fid="topF")
+    inner_movie = node("Dusk (1998) [1080p]",
+                       [vid("bl", "Dusk.1998.1080p.mkv")], fid="blF")
+    dusk_series = node("Dusk Series", [], subfolders=[inner_movie], fid="bsF")
+    top = node("Hollywood", [], subfolders=[dusk_series], fid="topF")
     rec = only(library.classify_node(top))
-    assert rec["title"] == "Blade"
+    assert rec["title"] == "Dusk"
     assert rec["file_id"] == "bl"
 
 
@@ -139,13 +139,13 @@ def test_nested_containers_recurse_to_movies():
 
 def test_show_by_season_subfolders():
     s1 = node("Season 1", [
-        vid("e1", "Ep 01.mkv", parent="s1", ancestors=["The Bear", "Season 1"]),
-        vid("e2", "Ep 02.mkv", parent="s1", ancestors=["The Bear", "Season 1"]),
+        vid("e1", "Ep 01.mkv", parent="s1", ancestors=["The Ladle", "Season 1"]),
+        vid("e2", "Ep 02.mkv", parent="s1", ancestors=["The Ladle", "Season 1"]),
     ], fid="s1")
     s2 = node("Season 2", [
-        vid("e3", "Ep 01.mkv", parent="s2", ancestors=["The Bear", "Season 2"]),
+        vid("e3", "Ep 01.mkv", parent="s2", ancestors=["The Ladle", "Season 2"]),
     ], fid="s2")
-    rec = only(library.classify_node(node("The Bear", [], subfolders=[s1, s2])))
+    rec = only(library.classify_node(node("The Ladle", [], subfolders=[s1, s2])))
     assert rec["type"] == "show"
     seasons = {s["season"]: s for s in rec["seasons"]}
     assert set(seasons) == {1, 2}
@@ -155,11 +155,11 @@ def test_show_by_season_subfolders():
 
 def test_show_by_flat_sxxexx_episodes():
     videos = [
-        vid("e2", "Breaking.Bad.S05E02.mkv"),
-        vid("e1", "Breaking.Bad.S05E01.mkv"),
-        vid("e3", "Breaking.Bad.S05E10.mkv"),
+        vid("e2", "Brewing.Storm.S05E02.mkv"),
+        vid("e1", "Brewing.Storm.S05E01.mkv"),
+        vid("e3", "Brewing.Storm.S05E10.mkv"),
     ]
-    rec = only(library.classify_node(node("Breaking Bad", videos)))
+    rec = only(library.classify_node(node("Brewing Storm", videos)))
     assert rec["type"] == "show"
     eps = rec["seasons"][0]["episodes"]
     assert [e["episode"] for e in eps] == [1, 2, 10]  # sorted by episode number
@@ -174,30 +174,30 @@ def test_single_episode_is_still_a_movie_heuristic():
 
 def test_episode_title_extracted():
     videos = [
-        vid("a", "Frasier (1993) - S05E10 - Where Every Bloke.mkv"),
-        vid("b", "Frasier (1993) - S05E11 - Perspectives.mkv"),
+        vid("a", "Quillson (1993) - S05E10 - Where Every Kettle Sings.mkv"),
+        vid("b", "Quillson (1993) - S05E11 - Perspectives.mkv"),
     ]
-    rec = only(library.classify_node(node("Frasier", videos)))
+    rec = only(library.classify_node(node("Quillson", videos)))
     eps = rec["seasons"][0]["episodes"]
-    assert eps[0]["title"] == "Where Every Bloke"
+    assert eps[0]["title"] == "Where Every Kettle Sings"
 
 
 # ------------------------------------------------------- classify: loose ------
 
 def test_loose_sxxexx_files_group_into_show():
     loose = [
-        rawfile("e1", "The Office S03E01 720p.mkv"),
-        rawfile("e2", "The Office S03E02 720p.mkv"),
-        rawfile("m1", "Whiplash 2014 1080p.mkv"),
+        rawfile("e1", "The Branch S03E01 720p.mkv"),
+        rawfile("e2", "The Branch S03E02 720p.mkv"),
+        rawfile("m1", "Drumfire 2014 1080p.mkv"),
     ]
     recs = library.classify_loose("drv1", loose)
     shows = [r for r in recs if r["type"] == "show"]
     movies = [r for r in recs if r["type"] == "movie"]
     assert len(shows) == 1
-    assert shows[0]["title"] == "The Office"
+    assert shows[0]["title"] == "The Branch"
     assert shows[0]["id"].startswith("loose:")
     assert len(shows[0]["seasons"][0]["episodes"]) == 2
-    assert len(movies) == 1 and movies[0]["title"] == "Whiplash"
+    assert len(movies) == 1 and movies[0]["title"] == "Drumfire"
     assert movies[0]["id"] == "m1"
 
 
@@ -217,14 +217,14 @@ def test_diff_add_remove():
 
 
 def test_movie_record_has_quality_from_filename():
-    n = node("Some Folder", [vid("v1", "Arrival.2016.2160p.UHD.BluRay.mkv")])
+    n = node("Some Folder", [vid("v1", "Skyharbor.2016.2160p.UHD.BluRay.mkv")])
     rec = only(library.classify_node(n))
     assert rec["quality"] == "4K"
 
 
 def test_movie_record_quality_falls_back_to_folder_name():
     # No quality in the file name, but the folder carries it.
-    n = node("Arrival (2016) 1080p BluRay", [vid("v1", "Arrival.mkv")])
+    n = node("Skyharbor (2016) 1080p BluRay", [vid("v1", "Skyharbor.mkv")])
     rec = only(library.classify_node(n))
     assert rec["quality"] == "1080p"
 
@@ -242,9 +242,9 @@ def test_show_record_uses_best_episode_quality():
 
 def test_loose_records_carry_quality():
     loose = [
-        rawfile("e1", "The Office S03E01 2160p.mkv"),
-        rawfile("e2", "The Office S03E02 720p.mkv"),
-        rawfile("m1", "Whiplash 2014 1080p.mkv"),
+        rawfile("e1", "The Branch S03E01 2160p.mkv"),
+        rawfile("e2", "The Branch S03E02 720p.mkv"),
+        rawfile("m1", "Drumfire 2014 1080p.mkv"),
     ]
     recs = library.classify_loose("drv1", loose)
     show = next(r for r in recs if r["type"] == "show")
@@ -254,11 +254,11 @@ def test_loose_records_carry_quality():
 
 
 def test_grouped_show_carries_best_member_quality():
-    m1 = _showrec("b1", "dBL", "Blackadder Season 1 S01", 1, 2)
+    m1 = _showrec("b1", "dBL", "Grimwold Season 1 S01", 1, 2)
     m1["quality"] = "SD"
-    m2 = _showrec("b2", "dBL", "Blackadder Season 2 S02", 2, 2)
+    m2 = _showrec("b2", "dBL", "Grimwold Season 2 S02", 2, 2)
     m2["quality"] = "1080p"
-    out = library.group_seasons([m1, m2], {"dBL": "TV | Blackadder"})
+    out = library.group_seasons([m1, m2], {"dBL": "TV | Grimwold"})
     assert len(out) == 1
     assert out[0]["quality"] == "1080p"
 
@@ -371,15 +371,15 @@ def _cache(tmp_path):
 def test_scan_builds_library_without_network(tmp_path):
     tree = {
         "drv1": [
-            rawfolder("movieF", "Arrival (2016)"),
-            rawfolder("showF", "The Bear"),
-            rawfile("loose", "Whiplash 2014 1080p.mkv", size=42, dur=6000),
+            rawfolder("movieF", "Skyharbor (2016)"),
+            rawfolder("showF", "The Ladle"),
+            rawfile("loose", "Drumfire 2014 1080p.mkv", size=42, dur=6000),
         ],
-        "movieF": [rawfile("mv", "Arrival.2016.1080p.mkv", size=9000, dur=7200000)],
+        "movieF": [rawfile("mv", "Skyharbor.2016.1080p.mkv", size=9000, dur=7200000)],
         "showF": [rawfolder("s1", "Season 1")],
         "s1": [
-            rawfile("s1e1", "The.Bear.S01E01.mkv", dur=1500000),
-            rawfile("s1e2", "The.Bear.S01E02.mkv", dur=1600000),
+            rawfile("s1e1", "The.Ladle.S01E01.mkv", dur=1500000),
+            rawfile("s1e2", "The.Ladle.S01E02.mkv", dur=1600000),
         ],
     }
     lib = library.Library(path=str(tmp_path / "library.json"))
@@ -388,10 +388,10 @@ def test_scan_builds_library_without_network(tmp_path):
     assert status["error"] is None
     assert status["running"] is False
     titles = {t["title"]: t for t in lib.titles_list()}
-    assert set(titles) == {"Arrival", "The Bear", "Whiplash"}
-    assert titles["Arrival"]["type"] == "movie"
-    assert titles["The Bear"]["type"] == "show"
-    assert len(titles["The Bear"]["seasons"][0]["episodes"]) == 2
+    assert set(titles) == {"Skyharbor", "The Ladle", "Drumfire"}
+    assert titles["Skyharbor"]["type"] == "movie"
+    assert titles["The Ladle"]["type"] == "show"
+    assert len(titles["The Ladle"]["seasons"][0]["episodes"]) == 2
     # File index / meta seeding populated for playback without a Drive call.
     assert lib.file_info("mv")["duration_ms"] == 7200000
 
@@ -405,8 +405,8 @@ def test_scan_survives_folder_rate_limit(tmp_path):
             return await super().browse(drive_id, folder_id, page_token, page_size)
 
     tree = {
-        "drv1": [rawfolder("badF", "Broken"), rawfolder("goodF", "Arrival (2016)")],
-        "goodF": [rawfile("mv", "Arrival.2016.mkv", size=10)],
+        "drv1": [rawfolder("badF", "Broken"), rawfolder("goodF", "Skyharbor (2016)")],
+        "goodF": [rawfile("mv", "Skyharbor.2016.mkv", size=10)],
     }
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FlakyAPI(tree), _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path))
@@ -419,11 +419,11 @@ def test_scan_survives_folder_rate_limit(tmp_path):
 
     # Once the folder recovers, a rescan lands everything.
     tree_ok = {k: v for k, v in tree.items()}
-    tree_ok["drv1"] = [rawfolder("goodF", "Arrival (2016)")]
+    tree_ok["drv1"] = [rawfolder("goodF", "Skyharbor (2016)")]
     scanner2 = library.Scanner(_FakeScanAPI(tree_ok), _DisabledTMDB(), lib, throttle=0,
                                cache=_cache(tmp_path))
     asyncio.run(scanner2.scan(["drv1"]))
-    assert [t["title"] for t in lib.titles_list()] == ["Arrival"]
+    assert [t["title"] for t in lib.titles_list()] == ["Skyharbor"]
 
 
 # --------------------------------------------- drive thumbnail fallback --------
@@ -451,8 +451,8 @@ class _FakeTMDB:
 
 def _thumb_tree():
     return {
-        "drv1": [rawfolder("movieF", "Arrival (2016)")],
-        "movieF": [rawfile("mv", "Arrival.2016.mkv", size=10,
+        "drv1": [rawfolder("movieF", "Skyharbor (2016)")],
+        "movieF": [rawfile("mv", "Skyharbor.2016.mkv", size=10,
                            thumb="https://lh3.example/thumb=s220")],
     }
 
@@ -583,9 +583,9 @@ def test_fetch_thumbnail_falls_back_when_bumped_request_raises():
 def test_title_for_file_maps_movies_and_episodes(tmp_path):
     lib = library.Library(path=str(tmp_path / "library.json"))
     lib.replace({
-        "movieA": {"id": "movieA", "type": "movie", "title": "Arrival",
+        "movieA": {"id": "movieA", "type": "movie", "title": "Skyharbor",
                    "file_id": "fA", "size": 1, "duration_ms": None},
-        "showB": {"id": "showB", "type": "show", "title": "The Bear",
+        "showB": {"id": "showB", "type": "show", "title": "The Ladle",
                   "seasons": [{"season": 1, "episodes": [
                       {"title": "System", "episode": 1, "file_id": "fE1",
                        "name": "e1.mkv", "duration_ms": None, "size": 1,
@@ -610,14 +610,14 @@ def _showrec(fid, drive, folder_name, season, n_eps, year=None):
 
 
 def test_group_prefixed_season_folders():
-    # "Blackadder Season 1 S01" siblings -> one "Blackadder" show.
-    recs = [_showrec("b1", "dBL", "Blackadder Season 1 S01", 1, 6),
-            _showrec("b2", "dBL", "Blackadder Season 2 S02", 2, 6),
-            _showrec("b3", "dBL", "Blackadder Specials", 0, 2)]
-    out = library.group_seasons(recs, {"dBL": "TV | Blackadder"})
+    # "Grimwold Season 1 S01" siblings -> one "Grimwold" show.
+    recs = [_showrec("b1", "dBL", "Grimwold Season 1 S01", 1, 6),
+            _showrec("b2", "dBL", "Grimwold Season 2 S02", 2, 6),
+            _showrec("b3", "dBL", "Grimwold Specials", 0, 2)]
+    out = library.group_seasons(recs, {"dBL": "TV | Grimwold"})
     assert len(out) == 1
     show = out[0]
-    assert show["type"] == "show" and show["title"] == "Blackadder"
+    assert show["type"] == "show" and show["title"] == "Grimwold"
     assert sorted(s["season"] for s in show["seasons"]) == [0, 1, 2]
     assert show["id"].startswith("grp:")
 
@@ -625,39 +625,39 @@ def test_group_prefixed_season_folders():
 def test_group_bare_season_folders_uses_drive_name():
     recs = [_showrec("f1", "dFR", "Season 1", 1, 24),
             _showrec("f2", "dFR", "Season 2", 2, 24)]
-    out = library.group_seasons(recs, {"dFR": "Fraiser"})
-    assert len(out) == 1 and out[0]["title"] == "Fraiser"
+    out = library.group_seasons(recs, {"dFR": "Quillson"})
+    assert len(out) == 1 and out[0]["title"] == "Quillson"
     assert sorted(s["season"] for s in out[0]["seasons"]) == [1, 2]
 
 
 def test_group_merges_show_split_across_drives():
-    # Malcolm in the Middle split into Part 1 / Part 2 drives, bare seasons.
+    # Milo in the Muddle split into Part 1 / Part 2 drives, bare seasons.
     recs = [_showrec("a", "dM1", "Season 1", 1, 16),
             _showrec("b", "dM2", "Season 5", 5, 22)]
-    names = {"dM1": "TV | Malcom in the Middle (Part 1)",
-             "dM2": "TV | Malcom in the Middle (Part 2)"}
+    names = {"dM1": "TV | Milo in the Muddle (Part 1)",
+             "dM2": "TV | Milo in the Muddle (Part 2)"}
     out = library.group_seasons(recs, names)
     assert len(out) == 1
-    assert out[0]["title"] == "Malcom in the Middle"
+    assert out[0]["title"] == "Milo in the Muddle"
     assert sorted(s["season"] for s in out[0]["seasons"]) == [1, 5]
 
 
 def test_group_leaves_range_named_wrapper_untouched():
-    # "The Office Season 1-9 S01-s09" is a whole-series wrapper, not one season.
-    office = {"id": "off", "type": "show", "title": "The Office", "year": 2005,
+    # "The Branch Season 1-9 S01-s09" is a whole-series wrapper, not one season.
+    wrapper = {"id": "off", "type": "show", "title": "The Branch", "year": 2005,
               "drive_id": "dTV", "folder_id": "off", "poster": None, "tmdb_id": None,
-              "overview": None, "_folder_name": "The Office Season 1-9 S01-s09",
+              "overview": None, "_folder_name": "The Branch Season 1-9 S01-s09",
               "seasons": [{"season": n, "episodes": []} for n in range(1, 10)]}
-    out = library.group_seasons([office], {"dTV": "TV Shows"})
+    out = library.group_seasons([wrapper], {"dTV": "TV Shows"})
     assert len(out) == 1 and out[0]["id"] == "off"
     assert "_folder_name" not in out[0]  # transient key stripped
 
 
 def test_group_passthrough_strips_transient_keys():
-    movie = {"id": "mv", "type": "movie", "title": "Arrival", "year": 2016,
+    movie = {"id": "mv", "type": "movie", "title": "Skyharbor", "year": 2016,
              "drive_id": "d", "folder_id": "mv", "file_id": "mv", "size": 10,
              "duration_ms": None, "poster": None, "tmdb_id": None, "overview": None,
-             "_folder_name": "Arrival (2016)", "_video_name": "Arrival.2016.mkv"}
+             "_folder_name": "Skyharbor (2016)", "_video_name": "Skyharbor.2016.mkv"}
     out = library.group_seasons([movie], {"d": "Movies"})
     assert len(out) == 1 and out[0]["id"] == "mv" and out[0]["type"] == "movie"
     assert "_folder_name" not in out[0] and "_video_name" not in out[0]
@@ -669,16 +669,16 @@ def test_show_featurettes_subfolder_becomes_extras_season():
     # Show/Featurettes videos become a labelled pseudo-season, NOT season-1
     # episodes mixed in with the real ones.
     feats = node("Featurettes", [
-        vid("f1", "Behind the Couch.mkv", parent="ft",
-            ancestors=["Frasier", "Featurettes"]),
+        vid("f1", "Behind the Kettle.mkv", parent="ft",
+            ancestors=["Quillson", "Featurettes"]),
         vid("f2", "Celebrity Voices.mkv", parent="ft",
-            ancestors=["Frasier", "Featurettes"]),
+            ancestors=["Quillson", "Featurettes"]),
     ], fid="ft")
     s1 = node("Season 1", [
-        vid("e1", "Frasier S01E01.mkv", parent="s1", ancestors=["Frasier", "Season 1"]),
-        vid("e2", "Frasier S01E02.mkv", parent="s1", ancestors=["Frasier", "Season 1"]),
+        vid("e1", "Quillson S01E01.mkv", parent="s1", ancestors=["Quillson", "Season 1"]),
+        vid("e2", "Quillson S01E02.mkv", parent="s1", ancestors=["Quillson", "Season 1"]),
     ], fid="s1")
-    rec = only(library.classify_node(node("Frasier", [], subfolders=[s1, feats])))
+    rec = only(library.classify_node(node("Quillson", [], subfolders=[s1, feats])))
     assert rec["type"] == "show"
     real = [s for s in rec["seasons"] if not s.get("extras")]
     extras = [s for s in rec["seasons"] if s.get("extras")]
@@ -712,17 +712,17 @@ def test_root_featurettes_folder_attaches_to_drive_show():
     # The real-world layout: a drive that IS the show (bare Season N folders)
     # with a sibling Featurettes/Season N tree. No separate tile survives.
     s1 = node("Season 1", [
-        vid("e1", "Frasier S01E01.mkv", parent="s1", ancestors=["Season 1"]),
-        vid("e2", "Frasier S01E02.mkv", parent="s1", ancestors=["Season 1"]),
+        vid("e1", "Quillson S01E01.mkv", parent="s1", ancestors=["Season 1"]),
+        vid("e2", "Quillson S01E02.mkv", parent="s1", ancestors=["Season 1"]),
     ], fid="s1")
     s2 = node("Season 2", [
-        vid("e3", "Frasier S02E01.mkv", parent="s2", ancestors=["Season 2"]),
-        vid("e4", "Frasier S02E02.mkv", parent="s2", ancestors=["Season 2"]),
+        vid("e3", "Quillson S02E01.mkv", parent="s2", ancestors=["Season 2"]),
+        vid("e4", "Quillson S02E02.mkv", parent="s2", ancestors=["Season 2"]),
     ], fid="s2")
     feat = node("Featurettes", [], subfolders=[
-        node("Season 1", [vid("f1", "Behind the Couch.mkv", parent="fs1",
+        node("Season 1", [vid("f1", "Behind the Kettle.mkv", parent="fs1",
                               ancestors=["Featurettes", "Season 1"])], fid="fs1"),
-        node("Season 2", [vid("f2", "And Then There Was Eddie.mkv", parent="fs2",
+        node("Season 2", [vid("f2", "And Then There Was Pip.mkv", parent="fs2",
                               ancestors=["Featurettes", "Season 2"])], fid="fs2"),
     ], fid="feat")
     records = (library.classify_node(s1) + library.classify_node(s2)
@@ -730,10 +730,10 @@ def test_root_featurettes_folder_attaches_to_drive_show():
     main, extras = library.split_extras_records(records)
     assert [r["id"] for r in extras] == ["feat"]
     out = library.attach_extras(
-        library.group_seasons(main, {"drv1": "Fraiser"}), extras)
+        library.group_seasons(main, {"drv1": "Quillson"}), extras)
     assert len(out) == 1
     show = out[0]
-    assert show["title"] == "Fraiser"
+    assert show["title"] == "Quillson"
     real = [s for s in show["seasons"] if not s.get("extras")]
     ex = [s for s in show["seasons"] if s.get("extras")]
     assert [s["season"] for s in real] == [1, 2]
@@ -745,9 +745,9 @@ def test_root_featurettes_folder_attaches_to_drive_show():
 def test_root_extras_leaf_with_loose_clips_attaches_as_one_entry():
     # An extras folder holding loose clips classifies as one movie per file;
     # attach folds them back into a single labelled entry on the show.
-    show = only(library.classify_node(node("Frasier", [
-        vid("e1", "Frasier S01E01.mkv"),
-        vid("e2", "Frasier S01E02.mkv"),
+    show = only(library.classify_node(node("Quillson", [
+        vid("e1", "Quillson S01E01.mkv"),
+        vid("e2", "Quillson S01E02.mkv"),
     ], fid="sh")))
     clips = library.classify_node(node("Extras", [
         vid("c2", "Clip 2.mkv", parent="ex"),
@@ -782,17 +782,17 @@ def test_extras_stay_a_tile_when_drive_show_is_ambiguous():
 def test_member_season_folder_extras_survive_group_seasons():
     # "<Show> Season N" folder with its own Featurettes subfolder: the merge
     # keeps the featurettes as a labelled pseudo-season of the merged show.
-    n = node("Frasier Season 2", [
-        vid("e1", "Frasier S02E01.mkv", parent="s2"),
-        vid("e2", "Frasier S02E02.mkv", parent="s2"),
+    n = node("Quillson Season 2", [
+        vid("e1", "Quillson S02E01.mkv", parent="s2"),
+        vid("e2", "Quillson S02E02.mkv", parent="s2"),
     ], subfolders=[node("Featurettes", [
-        vid("f1", "And Then There Was Eddie.mkv", parent="ft")], fid="ft")],
+        vid("f1", "And Then There Was Pip.mkv", parent="ft")], fid="ft")],
         fid="s2")
     rec = only(library.classify_node(n))
     out = library.group_seasons([rec], {})
     assert len(out) == 1
     show = out[0]
-    assert show["title"] == "Frasier"
+    assert show["title"] == "Quillson"
     real = [s for s in show["seasons"] if not s.get("extras")]
     ex = [s for s in show["seasons"] if s.get("extras")]
     assert len(real) == 1 and real[0]["season"] == 2
@@ -806,10 +806,10 @@ def test_member_season_folder_extras_survive_group_seasons():
 def _two_drive_tree():
     """drv1: a movie; drv2: a movie. Independent content."""
     return {
-        "drv1": [rawfolder("m1F", "Arrival (2016)")],
-        "m1F": [rawfile("mv1", "Arrival.2016.1080p.mkv", size=10)],
-        "drv2": [rawfolder("m2F", "Sicario (2015)")],
-        "m2F": [rawfile("mv2", "Sicario.2015.1080p.mkv", size=10)],
+        "drv1": [rawfolder("m1F", "Skyharbor (2016)")],
+        "m1F": [rawfile("mv1", "Skyharbor.2016.1080p.mkv", size=10)],
+        "drv2": [rawfolder("m2F", "Riverline (2015)")],
+        "m2F": [rawfile("mv2", "Riverline.2015.1080p.mkv", size=10)],
     }
 
 
@@ -823,8 +823,8 @@ def test_partial_refresh_equals_full_refresh(tmp_path):
     assert set(full) == {"mv1", "mv2"}
 
     # Add a movie to drv2, then refresh ONLY drv2.
-    tree["drv2"].append(rawfolder("m3F", "Dune (2021)"))
-    tree["m3F"] = [rawfile("mv3", "Dune.2021.2160p.mkv", size=10)]
+    tree["drv2"].append(rawfolder("m3F", "Sandsea (2021)"))
+    tree["m3F"] = [rawfile("mv3", "Sandsea.2021.2160p.mkv", size=10)]
     asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"]))
     titles = {t["id"]: t for t in lib.titles_list()}
     # drv1's title survives untouched; drv2's addition landed.
@@ -845,8 +845,8 @@ def test_partial_refresh_preserves_cross_drive_grouped_show(tmp_path):
 
     class _NamedAPI(_FakeScanAPI):
         async def list_drives(self, force=False):
-            return [{"id": "dM1", "name": "TV | Malcom in the Middle (Part 1)"},
-                    {"id": "dM2", "name": "TV | Malcom in the Middle (Part 2)"}]
+            return [{"id": "dM1", "name": "TV | Milo in the Muddle (Part 1)"},
+                    {"id": "dM2", "name": "TV | Milo in the Muddle (Part 2)"}]
 
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_NamedAPI(tree), _DisabledTMDB(), lib, throttle=0,
@@ -967,12 +967,12 @@ def test_tmdb_cache_heal_drops_genreless_entries():
 
 
 class _GenreTMDB:
-    """TMDB stub: 'India The Modi Question' is a documentary; others match
+    """TMDB stub: 'Coastland The Varen Question' is a documentary; others match
     plain movies; 'Unknown' has no TMDB entry at all."""
     enabled = True
 
     async def enrich(self, title, year=None, media_type="movie"):
-        if "modi" in title.lower():
+        if "varen" in title.lower():
             return {"tmdb_id": 9, "title": title, "year": year,
                     "poster_key": None, "overview": None, "genre_ids": [99]}
         if "unknown" in title.lower():
@@ -984,12 +984,12 @@ class _GenreTMDB:
 def test_scanner_stamps_categories(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     tree = {
-        "drv1": [rawfolder("docF", "India The Modi Question"),
-                 rawfolder("movF", "Arrival (2016)"),
+        "drv1": [rawfolder("docF", "Coastland The Varen Question"),
+                 rawfolder("movF", "Skyharbor (2016)"),
                  rawfolder("unkF", "Unknown Home Video")],
-        "docF": [rawfile("d1", "India.The.Modi.Question.S01E01.mkv"),
-                 rawfile("d2", "India.The.Modi.Question.S01E02.mkv")],
-        "movF": [rawfile("m1", "Arrival.2016.1080p.mkv")],
+        "docF": [rawfile("d1", "Coastland.The.Varen.Question.S01E01.mkv"),
+                 rawfile("d2", "Coastland.The.Varen.Question.S01E02.mkv")],
+        "movF": [rawfile("m1", "Skyharbor.2016.1080p.mkv")],
         "unkF": [rawfile("u1", "Unknown Home Video.mp4")],
     }
     lib = library.Library(path=str(tmp_path / "library.json"))
@@ -997,8 +997,8 @@ def test_scanner_stamps_categories(tmp_path, monkeypatch):
                               cache=_cache(tmp_path))
     asyncio.run(scanner.scan(["drv1"]))
     cats = {t["title"]: t["category"] for t in lib.titles_list()}
-    assert cats["India The Modi Question"] == "documentary"
-    assert cats["Arrival"] == "movie"
+    assert cats["Coastland The Varen Question"] == "documentary"
+    assert cats["Skyharbor"] == "movie"
     assert cats["Unknown Home Video"] == "other"
 
 
@@ -1016,8 +1016,8 @@ def test_scanner_category_hint_overrides_no_match(tmp_path, monkeypatch):
 
 def test_category_carried_across_rescans(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
-    tree = {"drv1": [rawfolder("movF", "Arrival (2016)")],
-            "movF": [rawfile("m1", "Arrival.2016.mkv")]}
+    tree = {"drv1": [rawfolder("movF", "Skyharbor (2016)")],
+            "movF": [rawfile("m1", "Skyharbor.2016.mkv")]}
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _GenreTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
@@ -1031,8 +1031,8 @@ def test_category_carried_across_rescans(tmp_path, monkeypatch):
 
 
 def test_category_null_when_tmdb_disabled(tmp_path):
-    tree = {"drv1": [rawfolder("movF", "Arrival (2016)")],
-            "movF": [rawfile("m1", "Arrival.2016.mkv")]}
+    tree = {"drv1": [rawfolder("movF", "Skyharbor (2016)")],
+            "movF": [rawfile("m1", "Skyharbor.2016.mkv")]}
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
@@ -1045,7 +1045,7 @@ def test_category_null_when_tmdb_disabled(tmp_path):
 def test_migrate_library_v1_stamps_fields(tmp_path):
     import json as _json
     v1 = {"version": 1, "generated_at": 1.0, "titles": {
-        "movieA": {"id": "movieA", "type": "movie", "title": "Arrival",
+        "movieA": {"id": "movieA", "type": "movie", "title": "Skyharbor",
                    "drive_id": "drv1", "file_id": "fA", "size": 1},
     }}
     p = tmp_path / "library.json"
@@ -1091,7 +1091,7 @@ def test_course_named_part1_never_merges_as_season(tmp_path):
     # An entertainment drive has "X Season 1"-style folders; a COURSES drive
     # has a "(Part 1)" folder — grouping must only appl to entertainment.
     tree = {
-        "ent": [rawfolder("s1", "Blackadder Season 1 S01")],
+        "ent": [rawfolder("s1", "Grimwold Season 1 S01")],
         "s1": [rawfile("e1", "ep1.mkv"), rawfile("e2", "ep2.mkv")],
         "crs": [rawfolder("p1", "Python Data Science (Part 1)")],
         "p1": [rawfile("l1", "01) Intro.mp4"), rawfile("l2", "02) Lists.mp4")],

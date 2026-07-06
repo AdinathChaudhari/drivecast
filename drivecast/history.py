@@ -106,6 +106,19 @@ class History:
                 return True
             return False
 
+    def remove(self, file_id):
+        """Drop an entry entirely (Continue Watching dismiss).
+
+        Returns True if the entry existed. Persists immediately when it did —
+        the resume position is intentionally discarded.
+        """
+        with self._lock:
+            existed = file_id in self._data
+            if existed:
+                self._data.pop(file_id, None)
+                self._write_atomic()
+            return existed
+
     def mark_watched(self, file_id, watched=True):
         with self._lock:
             entry = self._data.get(file_id)

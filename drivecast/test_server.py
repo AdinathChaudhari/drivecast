@@ -273,6 +273,49 @@ def test_continue_unknown_file_passes_through(client):
     assert "poster" not in it and "title" not in it
 
 
+def test_history_remove_drops_entry_and_persists(tmp_path):
+    hist = history_mod.History(path=str(tmp_path / "history.json"))
+    hist.update("fileA", name="Arrival", position=100.0, duration=1000.0, force=True)
+    assert hist.get("fileA") is not None
+    # Removing an existing entry returns True and rewrites the file without it.
+    assert hist.remove("fileA") is True
+    assert hist.get("fileA") is None
+    with open(hist.path) as f:
+        assert "fileA" not in json.load(f)
+    # An unknown id is a no-op returning False.
+    assert hist.remove("nope") is False
+
+
+def test_continue_remove_endpoint_deletes_entry(client):
+    hist = client.app.state.dc.history
+    hist.update("fileE1", name="The.Bear.S01E01.mkv",
+                position=600.0, duration=1500.0, force=True)
+    assert any(it["file_id"] == "fileE1"
+               for it in client.get("/api/continue").json()["items"])
+    r = client.delete("/api/continue/fileE1")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "removed": True}
+    # Gone from history (and thus the shelf) and off disk.
+    assert hist.get("fileE1") is None
+    assert not any(it["file_id"] == "fileE1"
+                   for it in client.get("/api/continue").json()["items"])
+    assert "fileE1" not in _disk(client)
+
+
+def test_continue_remove_unknown_file_id(client):
+    r = client.delete("/api/continue/does-not-exist")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "removed": False}
+
+
+def test_static_assets_carry_no_cache(client):
+    # Static assets must revalidate so a rebuilt app.js/style.css isn't served
+    # stale from the browser's heuristic cache.
+    r = client.get("/static/app.js")
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "no-cache"
+
+
 def test_refresh_status_shape(client):
     r = client.get("/api/refresh/status")
     assert r.status_code == 200
@@ -727,3 +770,90 @@ def test_remote_qr_label_selects_url(client, monkeypatch):
         r = client.get(url)
         assert r.status_code == code
         assert r.headers["content-type"].startswith("image/svg")
+
+
+# ---- Fire TV support: file-index enrichment, /api/subtitles, /api/ping ----
+
+def test_file_info_includes_drive_and_parent(client):
+    lib = client.app.state.dc.library
+    movie = lib.file_info("fileA")
+    assert movie["drive_id"] == "drv1"
+    assert movie["parent_id"] == "movieA"  # the movie's folder
+    ep = lib.file_info("fileE1")
+    assert ep["drive_id"] == "drv1"
+    assert ep["parent_id"] == "s1"
+
+
+def _seed_sub(client, file_id, ext=".srt", text="1\n00:00:01,000 --> 00:00:02,000\nhello\n"):
+    import os
+    subs_dir = client.app.state.dc.subtitles.subs_dir
+    os.makedirs(subs_dir, exist_ok=True)
+    path = os.path.join(subs_dir, file_id + ext)
+    with open(path, "w") as f:
+        f.write(text)
+    return path
+
+
+def test_subtitles_cached_hit(client):
+    _seed_sub(client, "fileA")
+    r = client.get("/api/subtitles/fileA")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/x-subrip")
+    assert "hello" in r.text
+
+
+def test_subtitles_miss_returns_404(client):
+    # Unknown file: not in the index, no drive_id -> no sibling lookup, no
+    # OpenSubtitles key -> resolver returns None without any network.
+    r = client.get("/api/subtitles/unknownfile")
+    assert r.status_code == 404
+    assert r.json() == {"error": "no_subtitles"}
+
+
+def test_subtitles_head_hit_and_miss(client):
+    _seed_sub(client, "fileE1")
+    hit = client.head("/api/subtitles/fileE1")
+    assert hit.status_code == 200
+    assert not hit.content  # HEAD: headers only
+    miss = client.head("/api/subtitles/unknownfile")
+    assert miss.status_code == 404
+
+
+def test_subtitles_sub_ext_unsupported(client):
+    # MicroDVD .sub resolves from the cache but can't be served to players.
+    _seed_sub(client, "fileA", ext=".sub", text="{1}{50}hello")
+    r = client.get("/api/subtitles/fileA")
+    assert r.status_code == 404
+    assert r.json() == {"error": "no_subtitles"}
+
+
+def test_subtitles_disabled_returns_404(client):
+    _seed_sub(client, "fileA")
+    client.app.state.dc.cfg["subtitles"] = False
+    r = client.get("/api/subtitles/fileA")
+    assert r.status_code == 404
+    assert r.json() == {"error": "subtitles_disabled"}
+
+
+def test_ping_reachable_from_remote_without_token(make_client):
+    # Discovery must answer even with remote access off, so a TV client can
+    # find the server and tell the user to enable Remote Access.
+    with make_client({"remote_access": False}) as c:
+        r = c.get("/api/ping")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["app"] == "drivecast"
+        assert body["remote"] is False
+        assert "version" in body
+
+
+def test_ping_local_ok(client):
+    r = client.get("/api/ping")
+    assert r.status_code == 200
+    assert r.json()["app"] == "drivecast"
+
+
+def test_subtitles_requires_token_for_remote(make_client):
+    with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
+        r = c.get("/api/subtitles/fileA")
+        assert r.status_code == 401

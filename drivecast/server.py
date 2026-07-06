@@ -23,7 +23,8 @@ from .library import Library, Scanner
 from .player import PlayerError, PlayerManager, detect_player
 from .rclone_auth import RcloneError, TokenManager
 from .scan_cache import ScanCache
-from .subtitles import SubtitleResolver
+from . import __version__ as APP_VERSION
+from .subtitles import SubtitleResolver, mime_for
 from .streaming import Streamer
 from .tmdb import TMDB
 
@@ -156,6 +157,12 @@ def create_app(cfg=None):
     async def _remote_auth(request: Request, call_next):
         if _client_is_local(request):
             return await call_next(request)
+        # /api/ping is an unauthenticated discovery probe, reachable even when
+        # remote access is off, so a TV/phone client scanning the LAN can find
+        # the server and prompt the user to enable Remote Access. It discloses
+        # nothing beyond the app's presence.
+        if request.url.path == "/api/ping":
+            return await call_next(request)
         if not cfg.get("remote_access"):
             return JSONResponse({"error": "remote_disabled"}, status_code=403)
         # The CA certificate is public material (its subject + public key are
@@ -187,6 +194,18 @@ def create_app(cfg=None):
             response.set_cookie("dc_token", query_token, httponly=True,
                                 samesite="lax", max_age=180 * 24 * 3600,
                                 secure=(request.url.scheme == "https"))
+        return response
+
+    @app.middleware("http")
+    async def _static_no_cache(request: Request, call_next):
+        """Force revalidation of static assets. StaticFiles already emits an
+        ETag/Last-Modified, but without Cache-Control browsers cache
+        heuristically and can serve a stale app.js/style.css after an update.
+        `no-cache` means "revalidate every time" — the etag makes that a cheap
+        304, so the browser always picks up a new build."""
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
         return response
 
     # ---- setup / preflight gate ----
@@ -500,6 +519,16 @@ def create_app(cfg=None):
                 item["section"] = rec.get("section", "entertainment")
         return {"items": items}
 
+    @app.delete("/api/continue/{file_id}")
+    async def api_continue_remove(file_id: str):
+        """Dismiss a tile from Continue Watching by dropping its history entry.
+
+        The resume position is intentionally discarded. Auth is handled by the
+        remote-access middleware, same as /api/progress."""
+        state = app.state.dc
+        removed = state.history.remove(file_id)
+        return {"ok": True, "removed": removed}
+
     @app.get("/api/watched-map")
     async def api_watched_map():
         """file_id -> last_played epoch, for the client-side "Recently watched"
@@ -507,6 +536,41 @@ def create_app(cfg=None):
         state = app.state.dc
         return {"map": state.history.last_played_map(),
                 "progress": state.history.progress_map()}
+
+    @app.get("/api/ping")
+    async def api_ping():
+        """Unauthenticated discovery probe (exempted in _remote_auth) so LAN
+        clients can find the server even before Remote Access is enabled."""
+        return {"app": "drivecast", "version": APP_VERSION,
+                "remote": bool(cfg.get("remote_access"))}
+
+    @app.api_route("/api/subtitles/{file_id}", methods=["GET", "HEAD"])
+    async def api_subtitles(file_id: str, name: str = None,
+                            drive_id: str = None, parent_id: str = None):
+        """Resolve (and cache) an English subtitle for a video and serve it.
+
+        Remote players (the web player can't use these yet, but TV/phone apps
+        can) probe with HEAD before playback and stream the same URL as a
+        subtitle track. Query overrides support files outside the library
+        index (browse-only playback). Same bounded-resolution philosophy as
+        /api/play: a slow lookup 404s rather than blocking."""
+        state = app.state.dc
+        if not state.cfg.get("subtitles", True):
+            return JSONResponse({"error": "subtitles_disabled"}, status_code=404)
+        info = state.library.file_info(file_id) or {}
+        name = name or info.get("name") or file_id
+        drive_id = drive_id or info.get("drive_id")
+        parent_id = parent_id or info.get("parent_id")
+        try:
+            sub_path = await asyncio.wait_for(
+                state.subtitles.resolve(file_id, name, drive_id, parent_id),
+                timeout=15.0)
+        except Exception:
+            sub_path = None
+        media_type = mime_for(sub_path) if sub_path else None
+        if not media_type:
+            return JSONResponse({"error": "no_subtitles"}, status_code=404)
+        return FileResponse(sub_path, media_type=media_type)
 
     @app.post("/api/enrich")
     async def api_enrich(request: Request):

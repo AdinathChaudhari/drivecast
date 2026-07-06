@@ -622,6 +622,8 @@ class Library:
                     "size": rec.get("size"),
                     "duration_ms": rec.get("duration_ms"),
                     "media": rec.get("media") or "video",
+                    "drive_id": rec.get("drive_id"),
+                    "parent_id": rec.get("folder_id"),  # the movie's folder
                 }
                 owners[rec["file_id"]] = rec.get("id")
             elif rec.get("type") == "show":
@@ -633,6 +635,8 @@ class Library:
                                 "size": ep.get("size"),
                                 "duration_ms": ep.get("duration_ms"),
                                 "media": ep.get("media") or "video",
+                                "drive_id": rec.get("drive_id"),
+                                "parent_id": ep.get("parent_id"),
                             }
                             owners[ep["file_id"]] = rec.get("id")
                     ab = season.get("audiobook")
@@ -642,6 +646,8 @@ class Library:
                             "size": ab.get("size"),
                             "duration_ms": None,
                             "media": "audio",
+                            "drive_id": rec.get("drive_id"),
+                            "parent_id": ab.get("parent_id"),
                         }
                         owners[ab["file_id"]] = rec.get("id")
         self._file_index = idx

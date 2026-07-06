@@ -31,6 +31,21 @@ OS_USER_AGENT = "drivecast v1.0"
 # Markers that suggest an English subtitle file.
 _EN_MARKERS = ("english", ".en.", ".eng.", "_en.", "-en.", ".en-", "[en]")
 
+# MIME types for subtitle formats that remote players (e.g. Media3/ExoPlayer)
+# can parse when served over HTTP. MicroDVD .sub is deliberately absent —
+# nothing downstream can render it, so it's treated as "no subtitles".
+SUB_MIME = {
+    ".srt": "application/x-subrip",
+    ".vtt": "text/vtt",
+    ".ass": "text/x-ssa",
+}
+
+
+def mime_for(path):
+    """MIME type for a subtitle file, or None if the format can't be served."""
+    ext = os.path.splitext(path or "")[1].lower()
+    return SUB_MIME.get(ext)
+
 
 def is_subtitle_name(name):
     return (name or "").lower().endswith(SUB_EXTS)

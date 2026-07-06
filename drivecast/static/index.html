@@ -10,6 +10,16 @@
   <title>drivecast</title>
   <link rel="manifest" href="/static/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <!-- Apply the saved theme before first paint to avoid a flash. Default: dark. -->
+  <script>
+    (function () {
+      try {
+        if (localStorage.getItem("theme") === "light") {
+          document.documentElement.setAttribute("data-theme", "light");
+        }
+      } catch (e) { /* private mode / no storage -> default dark */ }
+    })();
+  </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -23,6 +33,9 @@
     <nav class="topnav">
       <button id="refreshBtn" class="navbtn" title="Refresh library">
         <span class="refresh-icon">⟳</span><span class="refresh-label">Refresh</span>
+      </button>
+      <button id="themeToggle" class="navbtn ghost" title="Toggle light / dark theme" aria-label="Toggle light / dark theme">
+        <span class="theme-icon">🌙</span>
       </button>
       <a id="settingsLink" class="navbtn" href="#/settings">Settings</a>
       <a id="browseLink" class="navbtn ghost" href="#/browse" title="Browse raw files">Browse files</a>

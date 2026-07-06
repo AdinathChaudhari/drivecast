@@ -164,8 +164,11 @@ resolved at play time and cached locally (`data/subs/`):
 
 The subtitle is handed to mpv / IINA / VLC as a local file, so it appears
 pre-loaded (toggle it in the player as usual). Autoplay-advanced episodes
-reuse cached subtitles. Turn the whole feature off with **Settings → English
-subtitles when available**.
+reuse cached subtitles. Remote clients get the same resolution over HTTP:
+`GET /api/subtitles/{file_id}` serves the resolved file (SRT/VTT/ASS) with
+the right MIME type — the [Fire TV app](https://github.com/AdinathChaudhari/drivecast-app)
+attaches it as a subtitle track. Turn the whole feature off with **Settings →
+English subtitles when available**.
 
 ## Watch on your iPhone / iPad
 
@@ -217,6 +220,29 @@ What plays where:
 
 Tap **Add to Home Screen** in Safari afterward and it opens full-screen like a
 real app, with no browser chrome.
+
+## Watch on your TV (Fire TV / Android TV)
+
+There's a **native TV client** — [drivecast-app](https://github.com/AdinathChaudhari/drivecast-app)
+— built for the Amazon Fire TV Stick (and Android TV generally): Kotlin,
+Compose for TV and ExoPlayer, sideloaded as an APK. It talks to the same
+server as every other client, with the same token, and adds what the web
+player can't do:
+
+- **MKV / HEVC play natively** — ExoPlayer decodes them in hardware, so
+  there's no hand-off to another app and no format whitelist.
+- **Made for a remote** — D-pad rows, focus scaling, media keys; a
+  Netflix-style Home with the Continue Watching shelf (dismissable there
+  too) and one row per section.
+- **Auto-discovery** — the app finds your Mac by probing the network for
+  drivecast's unauthenticated `GET /api/ping`, so pairing is just typing the
+  access token.
+- **Everything stays in sync** — resume positions, watched marks and the
+  Continue Watching shelf are shared with the web UI and the Mac, both ways.
+
+Requirements are the same as phone access: **Remote Access enabled** and the
+TV able to reach your Mac (same network, or Tailscale's Fire TV app for
+anywhere-access). Install and pairing instructions live in that repo's README.
 
 ### How safe is this?
 
@@ -351,7 +377,9 @@ Once `app.py` is running and the library opens in your browser:
    Year, Recently added, or Recently watched; and **Group** by nothing, by type
    (Movies / TV Shows), or by drive. Sort/group happen instantly client-side over
    the cached data and your choice is remembered. The search box does an instant,
-   offline search over the cached library.
+   offline search over the cached library. A **🌙/☀️ toggle** in the top bar
+   switches between dark and light themes (applied before first paint, so no
+   flash; remembered per device).
 4. **Open a title.** Click a movie tile for its detail page (poster, overview,
    **Play**). Click a show tile for its detail page with a **season selector** and
    that season's episodes in order — click an episode to play it. A **⤨ Shuffle**
@@ -372,8 +400,10 @@ Once `app.py` is running and the library opens in your browser:
    titles (including the right *episode* of a show) reappear on the home shelf and
    resume where you left off. Each shelf card shows the title's **poster** (with
    the progress bar overlaid) and the clean library title — an in-progress episode
-   shows its show's poster and name rather than the raw filename. Files played
-   outside the library (via **Browse files**) keep the gradient placeholder. mpv
+   shows its show's poster and name rather than the raw filename. An **✕** on
+   each card removes it from the shelf (dropping that file's saved position).
+   Files played outside the library (via **Browse files**) keep the gradient
+   placeholder. mpv
    stays the recommended default; if VLC's HTTP interface can't start, playback
    still works, just without resume tracking (and without autoplay, which needs
    the position to know the episode finished).

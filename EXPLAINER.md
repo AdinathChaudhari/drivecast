@@ -257,6 +257,31 @@ own app with its own copy of the stream URL and token. drivecast has no idea
 what happens after that handoff, which is also why resume tracking stops
 working for files played that way.
 
+### On your TV
+
+The same remote surface powers a **native Fire TV / Android TV app**,
+[drivecast-app](https://github.com/AdinathChaudhari/drivecast-app) — a separate
+repo, because it's a separate program (Kotlin + ExoPlayer) that just happens to
+speak drivecast's API. It needed almost nothing new from the server, which is
+the point: the JSON API plus the range-aware stream proxy already were a
+complete client contract. Two small additions closed the gaps:
+
+- `GET /api/ping` — the one deliberately **unauthenticated** endpoint. A TV
+  has no camera for QR pairing, so the app instead probes the local network
+  for something that answers "I'm a drivecast server". It reveals nothing but
+  the app's presence, and it answers even when remote access is off — so the
+  TV can tell you to go enable it rather than pretending nothing's there.
+- `GET /api/subtitles/{file_id}` — the subtitle machinery above always ended
+  in a *local file path*, which no remote player can use. This endpoint runs
+  the same resolution and serves the winning file over HTTP with its real
+  MIME type. No format conversion: ExoPlayer parses SRT/VTT/ASS natively.
+
+Because ExoPlayer decodes MKV and HEVC in hardware, the browser's format
+whitelist — and the whole VLC/Infuse handoff dance — simply doesn't exist on
+the TV. And since the app reports progress through the same `/api/progress`
+calls as the web player, the TV, the phone and the Mac all share one Continue
+Watching shelf.
+
 ---
 
 ## 6. The library cache (and browsing, search, posters)

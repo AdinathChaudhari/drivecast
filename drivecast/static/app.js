@@ -281,13 +281,23 @@ function continueCard(item) {
       onerror="this.parentElement.classList.add('placeholder');
                this.parentElement.insertAdjacentHTML('afterbegin', this.dataset.ph||'');this.remove()" data-ph='${escapeHTML(ph)}'>`;
   }
+  const dismiss = `<button class="dismiss" title="Remove from Continue Watching" aria-label="Remove from Continue Watching">×</button>`;
   card.innerHTML = `
-    <div class="poster${cls}">${inner}${progress}</div>
+    <div class="poster${cls}">${inner}${progress}${dismiss}</div>
     <div class="label">${escapeHTML(label)}</div>
     <div class="sub">${Math.round(item.percent)}% · ${fmtTime(item.position)} watched</div>`;
   card.addEventListener("click", () =>
     playFile({ id: item.file_id, name: item.name, drive_id: item.drive_id, parent_id: item.parent_id },
              item.duration ? item.duration * 1000 : null, true));
+  card.querySelector(".dismiss").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try {
+      await api("/api/continue/" + encodeURIComponent(item.file_id), { method: "DELETE" });
+    } catch (_) { /* removing the tile locally is the useful outcome regardless */ }
+    card.remove();
+    const row = $("continueRow");
+    if (row && !row.children.length) show($("continueSection"), false);
+  });
   return card;
 }
 
@@ -1350,6 +1360,29 @@ $("browseBack").addEventListener("click", () => { location.hash = "#/"; });
 $("refreshBtn").addEventListener("click", triggerRefresh);
 $("saveSettings").addEventListener("click", saveSettings);
 if ($("remoteAccess")) $("remoteAccess").addEventListener("change", renderRemoteBlock);
+
+// ---------- theme (light / dark) ----------
+// The saved theme is applied before first paint by an inline script in
+// index.html's <head>; here we just keep the toggle button's icon in sync and
+// persist changes. Default is dark (no data-theme attribute).
+function currentTheme() {
+  return document.documentElement.getAttribute("data-theme") === "light" ? "light" : "dark";
+}
+function applyTheme(theme) {
+  const light = theme === "light";
+  document.documentElement.setAttribute("data-theme", light ? "light" : "dark");
+  try { localStorage.setItem("theme", light ? "light" : "dark"); } catch (_) {}
+  const icon = $("themeToggle") && $("themeToggle").querySelector(".theme-icon");
+  if (icon) icon.textContent = light ? "☀️" : "🌙";
+  // Keep the mobile status-bar tint matching the page background.
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", light ? "#f4f5f8" : "#0f0f13");
+}
+if ($("themeToggle")) {
+  applyTheme(currentTheme());   // sync icon + meta with the pre-paint choice
+  $("themeToggle").addEventListener("click", () =>
+    applyTheme(currentTheme() === "light" ? "dark" : "light"));
+}
 
 $("filters").addEventListener("click", (e) => {
   const btn = e.target.closest(".chip");

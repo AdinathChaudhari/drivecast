@@ -58,6 +58,8 @@ OPTIONS = {
         'pydantic',
         'pydantic_core',
         'rumps',
+        # Lazy runtime import in server.py for the remote-access QR codes.
+        'qrcode',
     ],
     # Modules the graph sometimes misses.
     'includes': [

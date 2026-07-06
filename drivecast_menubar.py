@@ -31,6 +31,7 @@ import webbrowser
 import uvicorn
 
 from drivecast import config as config_mod
+from drivecast import localcert
 from drivecast.rclone_auth import RcloneError, TokenManager
 from drivecast.server import create_app
 
@@ -83,20 +84,40 @@ def _open_browser_later(url, delay=1.2):
 
 
 class ServerThread:
-    """Runs uvicorn.Server(app) in a daemon thread; stop() asks it to exit."""
+    """Runs uvicorn.Server(app) in a daemon thread; stop() asks it to exit.
 
-    def __init__(self, app, host, port):
+    When https_port/certfile/keyfile are given, a SECOND TLS listener is started
+    on the same app (trusted-LAN HTTPS for iPhones). The plain-HTTP server owns
+    AppState creation; the HTTPS listener runs with lifespan="off" and borrows
+    app.state.dc once it exists."""
+
+    def __init__(self, app, host, port, https_port=None, certfile=None, keyfile=None):
         config = uvicorn.Config(app, host=host, port=port, log_level="warning")
         self.server = uvicorn.Server(config)
         self.thread = threading.Thread(target=self.server.run, daemon=True)
+        self.https_server = None
+        self.https_thread = None
+        if https_port and certfile and keyfile:
+            https_config = uvicorn.Config(
+                app, host="0.0.0.0", port=https_port,
+                ssl_certfile=certfile, ssl_keyfile=keyfile,
+                log_level="warning", access_log=False, lifespan="off")
+            self.https_server = uvicorn.Server(https_config)
+            self.https_thread = threading.Thread(target=self.https_server.run, daemon=True)
 
     def start(self):
         self.thread.start()
+        if self.https_thread:
+            self.https_thread.start()
 
     def stop(self, timeout=5.0):
-        """Signal the server to exit and wait (bounded) for the thread."""
+        """Signal the server(s) to exit and wait (bounded) for the thread(s)."""
         self.server.should_exit = True
+        if self.https_server:
+            self.https_server.should_exit = True
         self.thread.join(timeout)
+        if self.https_thread:
+            self.https_thread.join(timeout)
 
 
 # ==========================================================================
@@ -320,8 +341,29 @@ def main():
 
     setup_ok = _preflight_ok(cfg)
 
+    # Trusted-LAN HTTPS (opt-in with remote access) so iPhones/iPads reach the
+    # Wi-Fi URL despite Safari's HTTPS-Only behavior. A busy https_port only
+    # disables HTTPS (the HTTP-port check above is the "already running" gate).
+    https = None
+    https_port = int(cfg.get("https_port", 8738))
+    if cfg.get("remote_access"):
+        https = localcert.ensure_certs()
+        if https and not _port_is_free("0.0.0.0", https_port):
+            https = None
+        if https:
+            cfg["_lan_https_port"] = https_port    # never persisted (not a SAVED_KEY)
+            fp = localcert.ca_fingerprint()
+            if fp:
+                # Also surfaced in the Settings UI; log it so the user can verify
+                # it against iOS's "More Details" fingerprint before installing.
+                print("[drivecast] CA SHA-256 fingerprint: %s" % fp, file=sys.stderr)
+
     app = create_app(cfg)
-    server = ServerThread(app, host, port)
+    if https:
+        server = ServerThread(app, host, port, https_port=https_port,
+                              certfile=https[0], keyfile=https[1])
+    else:
+        server = ServerThread(app, host, port)
     server.start()
 
     _run_app(server, port, setup_ok, url)

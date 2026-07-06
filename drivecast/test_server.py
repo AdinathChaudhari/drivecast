@@ -595,6 +595,125 @@ def test_serve_url_parses_status_output(monkeypatch):
     assert server_mod._tailscale_serve_url(9999) is None   # different port
 
 
+# ---- trusted-LAN HTTPS ----
+
+def test_remote_lists_wifi_https_first(client, monkeypatch):
+    # With the HTTPS listener live, "Wi-Fi (HTTPS)" leads (Tailscale-independent)
+    # and a ca_url is offered for the one-time trust step.
+    monkeypatch.setattr(server_mod, "_tailscale_serve_url", lambda port: None)
+    monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: "100.1.2.3")
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: "192.168.1.50")
+    # The live leaf covers this LAN IP.
+    monkeypatch.setattr(server_mod.localcert, "leaf_covers", lambda ip: True)
+    monkeypatch.setattr(server_mod.localcert, "ca_fingerprint", lambda: "AB:CD")
+    client.app.state.dc.cfg["remote_access"] = True
+    client.app.state.dc.cfg["remote_token"] = "tok123"
+    client.app.state.dc.cfg["_lan_https_port"] = 8738
+    body = client.get("/api/remote").json()
+    assert body["urls"][0] == {
+        "label": "Wi-Fi (HTTPS)",
+        "url": "https://192.168.1.50:8738/?token=tok123"}
+    assert body["https_port"] == 8738
+    assert body["ca_url"] == "http://192.168.1.50:8737/api/remote/ca"
+    assert body["ca_fingerprint"] == "AB:CD"
+    assert body["https_stale"] is False
+    # Plain Wi-Fi is still offered, last (Android/guests).
+    assert body["urls"][-1]["label"] == "Wi-Fi"
+
+
+def test_remote_https_omitted_when_leaf_stale(client, monkeypatch):
+    # LAN IP changed since the listener bound its cert: don't advertise a URL
+    # the live listener can't serve; flag a restart instead.
+    monkeypatch.setattr(server_mod, "_tailscale_serve_url", lambda port: None)
+    monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: None)
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: "10.0.1.7")
+    monkeypatch.setattr(server_mod.localcert, "leaf_covers", lambda ip: False)
+    client.app.state.dc.cfg["remote_access"] = True
+    client.app.state.dc.cfg["_lan_https_port"] = 8738
+    body = client.get("/api/remote").json()
+    assert [u["label"] for u in body["urls"]] == ["Wi-Fi"]  # plain only
+    assert body["ca_url"] is None
+    assert body["ca_fingerprint"] is None
+    assert body["https_stale"] is True
+
+
+def test_remote_no_https_entry_without_listener(client, monkeypatch):
+    # Regression guard: without _lan_https_port the ordering is unchanged.
+    monkeypatch.setattr(server_mod, "_tailscale_serve_url", lambda port: None)
+    monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: "100.1.2.3")
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: "192.168.1.50")
+    client.app.state.dc.cfg["remote_access"] = True
+    body = client.get("/api/remote").json()
+    assert [u["label"] for u in body["urls"]] == ["Tailscale", "Wi-Fi"]
+    assert body["https_port"] is None
+    assert body["ca_url"] is None
+
+
+def test_remote_ca_download_no_token(make_client, monkeypatch):
+    # A phone with no token cookie can still fetch the public CA cert.
+    monkeypatch.setattr(server_mod.localcert, "ca_pem_bytes", lambda: b"-----CA-----")
+    with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
+        r = c.get("/api/remote/ca")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/x-x509-ca-cert"
+        assert r.content == b"-----CA-----"
+
+
+def test_remote_ca_403_when_remote_disabled(make_client, monkeypatch):
+    monkeypatch.setattr(server_mod.localcert, "ca_pem_bytes", lambda: b"-----CA-----")
+    with make_client() as c:                 # remote_access False by default
+        r = c.get("/api/remote/ca")
+        assert r.status_code == 403
+        assert r.json()["error"] == "remote_disabled"
+
+
+def test_remote_ca_404_when_no_cert(client, monkeypatch):
+    monkeypatch.setattr(server_mod.localcert, "ca_pem_bytes", lambda: None)
+    client.app.state.dc.cfg["remote_access"] = True
+    r = client.get("/api/remote/ca")
+    assert r.status_code == 404
+    assert r.json()["error"] == "not_available"
+
+
+def test_remote_qr_trust_label(client, monkeypatch):
+    monkeypatch.setattr(server_mod, "_tailscale_serve_url", lambda port: None)
+    monkeypatch.setattr(server_mod, "_tailscale_ip", lambda: None)
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: "192.168.1.50")
+    monkeypatch.setattr(server_mod.localcert, "leaf_covers", lambda ip: True)
+    client.app.state.dc.cfg["remote_access"] = True
+    client.app.state.dc.cfg["_lan_https_port"] = 8738
+    r = client.get("/api/remote/qr?label=trust")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("image/svg")
+    assert b"<svg" in r.content
+
+
+def test_remote_qr_trust_404_without_https(client, monkeypatch):
+    # No HTTPS listener -> no ca_url -> the trust QR 404s.
+    monkeypatch.setattr(server_mod, "_lan_ip", lambda: "192.168.1.50")
+    client.app.state.dc.cfg["remote_access"] = True
+    r = client.get("/api/remote/qr?label=trust")
+    assert r.status_code == 404
+
+
+def test_cookie_secure_only_over_https(tmp_path, monkeypatch):
+    # A ?token= bootstrap cookie minted over TLS carries Secure; over plain
+    # HTTP it does not (so it never leaks onto the plain listener).
+    _install_stubs(tmp_path, monkeypatch)
+    cfg = _base_cfg(remote_access=True, remote_token="sekret")
+    app = server_mod.create_app(cfg)
+    with TestClient(app, client=("203.0.113.7", 51234),
+                    base_url="https://testserver") as c:
+        r = c.get("/api/remote?token=sekret")
+        assert r.status_code == 200
+        assert "secure" in r.headers.get("set-cookie", "").lower()
+    app2 = server_mod.create_app(_base_cfg(remote_access=True, remote_token="sekret"))
+    with TestClient(app2, client=("203.0.113.7", 51234),
+                    base_url="http://testserver") as c:
+        r = c.get("/api/remote?token=sekret")
+        assert "secure" not in r.headers.get("set-cookie", "").lower()
+
+
 def test_remote_qr_label_selects_url(client, monkeypatch):
     monkeypatch.setattr(server_mod, "_tailscale_serve_url",
                         lambda port: "https://mac.tailnet.ts.net")

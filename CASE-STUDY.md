@@ -415,6 +415,26 @@ names, IPs, or Drive ids anywhere public — and one preventive gap: the
 pre-commit hook didn't yet recognize the newer secret shapes, which was
 hardened the same day.
 
+One dependency still rankled: the *home Wi-Fi* URL — the one a phone on the
+same network should just use — was plain HTTP, so Safari refused it and
+Tailscale remained mandatory even on the couch. The fix made drivecast its
+own tiny certificate authority: shelling out to the Mac's **built-in
+LibreSSL** (zero new dependencies, nothing for py2app to bundle), it mints a
+frozen local root CA plus a rotating server certificate for the Mac's LAN IP
+and mDNS name, and opens a second TLS listener beside the loopback one. Trust
+the root once on the phone — the Settings card serves the profile and shows
+the CA's **SHA-256 fingerprint** to compare before installing, since a
+poisoned full-trust root would be strictly worse than plain HTTP — and the
+Wi-Fi URL is real HTTPS. The adversarial review pass earned its keep here
+too, catching a substring bug that let a cert for `192.168.1.50` claim it
+covered `192.168.1.5` (so the cert would never rotate) and the drift when a
+long-running Mac roams networks: the UI now detects a certificate that no
+longer matches the current address and asks for a restart instead of
+advertising a URL that can't work. The implementing agent, testing against a
+strict validator instead of trusting the plan, also found the planned openssl
+flags produced chains iOS would reject — missing authority-key-identifier
+extensions — and fixed them before a single device ever saw a cert error.
+
 
 ---
 
@@ -519,7 +539,8 @@ Infuse-style media *platform*: pick your drives, assign them to sections
 (Entertainment with movie/TV/documentary categories, Courses with modules and
 progress rings, Podcasts, plus private plugin sections), and browse posters,
 seasons, and episodes. Press play and the video streams (never downloads) to
-mpv/IINA/VLC — or to your **iPhone/iPad** over Tailscale HTTPS with the same
+mpv/IINA/VLC — or to your **iPhone/iPad** over trusted HTTPS (a local CA on
+home Wi-Fi, or Tailscale anywhere) with the same
 resume and Continue Watching — with English subtitles found automatically,
 instant seeking, autoplay, shuffle, and per-drive refresh when you add content.
 It's a self-contained `.app`, a public open-source repo audited to contain no
@@ -528,6 +549,7 @@ by AI agents coordinating other AI agents, with the human setting direction and
 clicking exactly one Tailscale approval button.
 
 *Tech: Python, FastAPI, httpx, rclone, Google Drive v3 API, TMDB,
-OpenSubtitles, Tailscale (Serve/HTTPS), mpv/IINA/VLC, rumps, py2app, qrcode.
+OpenSubtitles, LibreSSL (local CA), Tailscale (Serve/HTTPS), mpv/IINA/VLC,
+rumps, py2app, qrcode.
 Built with Claude Code — Fable 5 orchestrating; Opus implementing and
 security-reviewing; Sonnet designing docs and verifying; Haiku sweeping.*

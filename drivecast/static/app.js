@@ -877,6 +877,27 @@ async function renderRemoteBlock() {
   } else {
     show(qr, false);
   }
+  // Trusted-LAN HTTPS: when a CA download is available, offer the one-time
+  // "Trust this Mac" flow. Tapping it swaps the QR to the CA-download URL.
+  const trust = $("trustBlock");
+  if (trust) {
+    show(trust, !!(info && info.ca_url));
+    const fp = $("trustFingerprint");
+    if (fp) fp.textContent = (info && info.ca_fingerprint) || "";
+    const link = $("trustLink");
+    if (link && info && info.ca_url) {
+      link.onclick = (e) => {
+        e.preventDefault();
+        $("remoteQr").src = "/api/remote/qr?label=trust&_=" + Date.now();
+        show($("remoteQr"), true);
+        for (const row of list.children) row.classList.remove("active");
+      };
+    }
+  }
+  // The HTTPS listener's cert no longer matches this Mac's Wi-Fi address
+  // (roamed networks, or Wi-Fi came up after launch) — prompt a restart.
+  const stale = $("remoteHttpsStale");
+  if (stale) show(stale, !!(info && info.https_stale));
 }
 
 // Kick a refresh scoped to specific drives (per-drive refresh).

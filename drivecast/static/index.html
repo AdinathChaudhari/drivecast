@@ -133,6 +133,24 @@
           <p class="muted">Scan with your phone. Restart drivecast after turning this on.
             Tailscale recommended — see README.</p>
           <p id="remoteRestartNote" class="remote-restart hidden">Restart drivecast to apply.</p>
+          <p id="remoteHttpsStale" class="remote-restart hidden">Your Mac's Wi-Fi address
+            changed since drivecast started — restart it to re-issue the HTTPS certificate
+            for the new address.</p>
+          <div id="trustBlock" class="trust-block hidden">
+            <a href="#" id="trustLink" class="remote-url">Trust this Mac on your iPhone (one-time)</a>
+            <ol class="muted trust-steps">
+              <li>Scan the QR above. Safari downloads a profile — tap <b>Allow</b>
+                (and <b>Continue</b> if Safari warns the site isn't secure).</li>
+              <li>Settings → General → VPN &amp; Device Management → <b>drivecast CA</b> → Install.</li>
+              <li>Before tapping Install, open <b>More Details</b> and check the
+                SHA-256 fingerprint matches the one below — if it doesn't, someone on
+                your network is tampering with the download; <b>do not install it</b>.</li>
+              <li>Settings → General → About → Certificate Trust Settings → turn on <b>full trust</b>.</li>
+            </ol>
+            <p class="muted">Expected SHA-256 fingerprint:</p>
+            <code id="trustFingerprint" class="trust-fingerprint"></code>
+            <p class="muted">Then the Wi-Fi (HTTPS) link works in Safari without Tailscale.</p>
+          </div>
         </div>
       </div>
     </div>

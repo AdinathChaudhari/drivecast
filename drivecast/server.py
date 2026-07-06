@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config as config_mod
+from . import localcert
 from . import naming
 from .drive_api import DriveAPI, DriveAPIError
 from .history import History
@@ -157,6 +158,12 @@ def create_app(cfg=None):
             return await call_next(request)
         if not cfg.get("remote_access"):
             return JSONResponse({"error": "remote_disabled"}, status_code=403)
+        # The CA certificate is public material (its subject + public key are
+        # disclosed in every TLS handshake; no private key is served), and the
+        # phone has no token cookie yet when it fetches it — exempt it from the
+        # token check. The remote_access 403 gate above still applies.
+        if request.url.path == "/api/remote/ca":
+            return await call_next(request)
         cookie_token = request.cookies.get("dc_token")
         query_token = request.query_params.get("token")
         token = cookie_token or query_token
@@ -175,8 +182,11 @@ def create_app(cfg=None):
         # A ?token= link bootstraps a durable browser session so later
         # same-origin requests (the <video> src, static assets) carry the cookie.
         if not cookie_token and query_token:
+            # secure= only when minted over TLS, so a cookie set on the HTTPS
+            # listener never rides the plain-HTTP listener.
             response.set_cookie("dc_token", query_token, httponly=True,
-                                samesite="lax", max_age=180 * 24 * 3600)
+                                samesite="lax", max_age=180 * 24 * 3600,
+                                secure=(request.url.scheme == "https"))
         return response
 
     # ---- setup / preflight gate ----
@@ -557,9 +567,31 @@ def create_app(cfg=None):
         state = app.state.dc
         port = int(state.cfg.get("port", 8737))
         token = state.cfg.get("remote_token") or ""
+        lan_ip = _lan_ip()
+        # The trusted-LAN HTTPS listener; set by the entry point when it's live.
+        https_port = state.cfg.get("_lan_https_port")
+        ca_url = None
+        ca_fingerprint = None
+        https_stale = False
         urls = []
-        # Tailscale Serve HTTPS first (valid cert - survives HTTPS-Only
-        # Safari), then plain-HTTP tailnet, then LAN.
+        # Trusted-LAN HTTPS first: it's the goal (Tailscale-independent, survives
+        # HTTPS-Only Safari) and urls[0] drives the default QR. Then Tailscale
+        # Serve HTTPS, plain-HTTP tailnet, and plain Wi-Fi last (Android/guests).
+        if https_port and lan_ip:
+            # The listener bound its leaf at process start; if the LAN IP has
+            # since changed (DHCP roam, or Wi-Fi came up after launch) the live
+            # cert has no SAN for it, so advertising the HTTPS URL would hand the
+            # phone a cert-mismatch error. Only advertise when the running leaf
+            # actually covers this IP; otherwise flag that a restart re-issues it.
+            if localcert.leaf_covers(lan_ip):
+                urls.append({"label": "Wi-Fi (HTTPS)",
+                             "url": _remote_url(lan_ip, int(https_port), token, scheme="https")})
+                # The one-time trust download rides plain HTTP (the phone has no
+                # trusted cert yet); Safari shows one "not secure" interstitial.
+                ca_url = "http://%s:%d/api/remote/ca" % (lan_ip, port)
+                ca_fingerprint = localcert.ca_fingerprint()
+            else:
+                https_stale = True
         serve_url = _tailscale_serve_url(port)
         if serve_url:
             urls.append({"label": "Tailscale (HTTPS)",
@@ -567,13 +599,16 @@ def create_app(cfg=None):
         ts_ip = _tailscale_ip()
         if ts_ip:
             urls.append({"label": "Tailscale", "url": _remote_url(ts_ip, port, token)})
-        lan_ip = _lan_ip()
         if lan_ip:
             urls.append({"label": "Wi-Fi", "url": _remote_url(lan_ip, port, token)})
         return {
             "enabled": bool(state.cfg.get("remote_access")),
             "token": token,
             "port": port,
+            "https_port": int(https_port) if https_port else None,
+            "ca_url": ca_url,
+            "ca_fingerprint": ca_fingerprint,
+            "https_stale": https_stale,
             "urls": urls,
         }
 
@@ -584,22 +619,39 @@ def create_app(cfg=None):
         state = app.state.dc
         if not state.cfg.get("remote_access"):
             return JSONResponse({"error": "remote_disabled"}, status_code=404)
-        urls = (await api_remote())["urls"]
-        if not urls:
-            return JSONResponse({"error": "no_url"}, status_code=404)
-        url = urls[0]["url"]
-        if label:
-            want = label.strip().lower()
-            for u in urls:
-                if u["label"].lower() == want:
-                    url = u["url"]
-                    break
+        info = await api_remote()
+        # label="trust" -> QR of the CA-download URL (the one-time iOS trust step).
+        if label and label.strip().lower() == "trust":
+            url = info.get("ca_url")
+            if not url:
+                return JSONResponse({"error": "no_url"}, status_code=404)
+        else:
+            urls = info["urls"]
+            if not urls:
+                return JSONResponse({"error": "no_url"}, status_code=404)
+            url = urls[0]["url"]
+            if label:
+                want = label.strip().lower()
+                for u in urls:
+                    if u["label"].lower() == want:
+                        url = u["url"]
+                        break
         import qrcode
         import qrcode.image.svg
         img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage)
         buf = io.BytesIO()
         img.save(buf)
         return Response(content=buf.getvalue(), media_type="image/svg+xml")
+
+    @app.get("/api/remote/ca")
+    async def api_remote_ca():
+        """Download the local CA cert so iOS can trust the LAN HTTPS listener.
+        Token-exempt (see the middleware) but still gated on remote_access."""
+        pem = localcert.ca_pem_bytes()
+        if not pem or not app.state.dc.cfg.get("remote_access"):
+            return JSONResponse({"error": "not_available"}, status_code=404)
+        return Response(content=pem, media_type="application/x-x509-ca-cert",
+                        headers={"Content-Disposition": 'attachment; filename="drivecast-ca.crt"'})
 
     @app.post("/api/progress")
     async def api_progress(request: Request):
@@ -627,8 +679,8 @@ def create_app(cfg=None):
     return app
 
 
-def _remote_url(ip, port, token):
-    return "http://%s:%d/?token=%s" % (ip, port, token)
+def _remote_url(ip, port, token, scheme="http"):
+    return "%s://%s:%d/?token=%s" % (scheme, ip, port, token)
 
 
 def _lan_ip():

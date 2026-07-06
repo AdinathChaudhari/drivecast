@@ -15,6 +15,7 @@ import webbrowser
 import uvicorn
 
 from drivecast import config as config_mod
+from drivecast import localcert
 from drivecast.player import detect_player
 from drivecast.rclone_auth import RcloneError, TokenManager
 from drivecast.server import create_app
@@ -63,6 +64,19 @@ def _report_player(cfg):
               file=sys.stderr)
 
 
+def _start_https_thread(app, port, certfile, keyfile):
+    """Run a second uvicorn listener with TLS in a daemon thread, sharing the
+    same app. lifespan="off": the plain-HTTP server owns AppState creation, this
+    listener just borrows app.state.dc once it exists (a request in the first
+    ~1s could 500 before it's set — self-heals). access_log=False: tokens ride
+    in query strings and must never reach logs."""
+    config = uvicorn.Config(app, host="0.0.0.0", port=port,
+                            ssl_certfile=certfile, ssl_keyfile=keyfile,
+                            log_level="info", access_log=False, lifespan="off")
+    server = uvicorn.Server(config)
+    threading.Thread(target=server.run, daemon=True).start()
+
+
 def _open_browser_later(url):
     if os.environ.get("DRIVECAST_NO_BROWSER") == "1":
         return
@@ -99,16 +113,40 @@ def main():
     _preflight_rclone(cfg)
     _report_player(cfg)
 
+    # Trusted-LAN HTTPS (opt-in with remote access): a second TLS listener so
+    # iPhones/iPads reach the Wi-Fi URL despite Safari's HTTPS-Only behavior.
+    # Failure (no openssl, busy port) silently leaves plain HTTP as-is.
+    https = None
+    hp = int(cfg.get("https_port", 8738))
+    if cfg.get("remote_access"):
+        https = localcert.ensure_certs()      # self-detects the LAN IP
+        if https and not _port_is_free("0.0.0.0", hp):
+            print("[drivecast] WARNING: https_port %d busy; LAN HTTPS disabled." % hp,
+                  file=sys.stderr)
+            https = None
+        if https:
+            cfg["_lan_https_port"] = hp       # never persisted (not a SAVED_KEY)
+
     # The browser URL is always loopback — "0.0.0.0" is a bind address, not
     # a navigable host.
     url = "http://127.0.0.1:%d/" % port
     if host != "127.0.0.1":
         print("[drivecast] Remote access ON — also reachable on your network "
               "(see Settings for the phone URL/QR).")
+        if https:
+            print("[drivecast] Trusted-LAN HTTPS on :%d (scan the 'Trust this Mac' "
+                  "QR once per iPhone/iPad)." % hp)
+            fp = localcert.ca_fingerprint()
+            if fp:
+                print("[drivecast] CA SHA-256 fingerprint (verify this against the "
+                      "one iOS shows under 'More Details' before installing):")
+                print("[drivecast]   %s" % fp)
     print("[drivecast] Serving at %s" % url)
     _open_browser_later(url)
 
     app = create_app(cfg)
+    if https:
+        _start_https_thread(app, hp, certfile=https[0], keyfile=https[1])
     # access_log=False: request lines include ?token= query strings, and the
     # remote-access token must never reach stdout/log files.
     uvicorn.run(app, host=host, port=port, log_level="info", access_log=False)

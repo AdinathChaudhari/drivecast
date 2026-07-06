@@ -178,7 +178,19 @@ Mac. This is **off by default**.
    menu-bar app) — enabling it changes which address the server binds to, so
    it only takes effect on the next launch.
 2. Settings then shows a QR code and URL to scan, using either:
-   - **Tailscale (recommended)** — install it on your Mac and your phone/iPad
+   - **Same Wi-Fi (HTTPS)** — nothing to install, works with Safari's
+     HTTPS-Only mode. drivecast mints its own little certificate authority
+     on first launch and serves a trusted `https://…` address on your
+     network (port `8738` by default). One-time setup per device: tap
+     **Trust this Mac** in the Settings card (or scan its QR), install the
+     downloaded profile (Settings → Profile Downloaded), then enable full
+     trust under **Settings → General → About → Certificate Trust
+     Settings**. Before tapping Install, compare the certificate's SHA-256
+     fingerprint against the one the Settings card shows — if they don't
+     match, don't install. Only works on that network; if the Mac's IP
+     changes later, the Settings card will ask for a restart so drivecast
+     can re-issue the certificate (the root you trusted stays the same).
+   - **Tailscale** — install it on your Mac and your phone/iPad
      (`brew install` / App Store, on the same tailnet), then scan the QR.
      Works from anywhere — home, a cafe, cellular — and the traffic is
      encrypted end-to-end.
@@ -189,8 +201,6 @@ Mac. This is **off by default**.
      run `tailscale serve --bg 8737` on the Mac (first time, it prints a
      link to enable Serve for your tailnet — one click), and drivecast's QR
      automatically switches to the `https://<mac>.<tailnet>.ts.net` URL.
-   - **Same Wi-Fi** — no extra install; just scan the QR while your phone and
-     Mac are on the same network. Only works on that network.
 3. Scan the QR (or open the URL). The link carries a secret **token** —
    treat it like a password: anyone with the link can stream your whole
    library, so don't post the QR or URL anywhere public.
@@ -228,6 +238,16 @@ break several independent things at once:
    someone holding a valid link could only *watch* — never delete, modify or
    upload. And playback on the Mac (`/api/play`) refuses non-local clients
    outright.
+
+About that Wi-Fi HTTPS certificate: it's signed by a private CA drivecast
+generates locally with the Mac's built-in `openssl`. Both keys live in
+`~/Library/Application Support/drivecast/certs/` with owner-only permissions
+and never leave the Mac; the CA-download endpoint serves only the public
+certificate. Installing the profile tells your phone to trust certificates
+signed by *your* drivecast — which is exactly why the Settings card shows the
+CA's SHA-256 fingerprint: it's your proof that the profile Safari downloaded
+is the one your Mac generated, not something swapped in by whoever else is on
+the network. If the fingerprints differ, don't install.
 
 The QR / URL **is** the credential — treat it like a password. To revoke all
 access instantly (lost phone, shared a link by mistake): set
@@ -452,6 +472,7 @@ only — secrets go in `secrets/` (above).
 | `port`         | `8737`    | local port (bound to 127.0.0.1 only)                |
 | `remote_access` | `false`  | opt-in: expose the server on your LAN/tailnet (with a token) for phone/tablet viewing |
 | `remote_token` | `""`      | auto-generated secret required on every non-local request when `remote_access` is on |
+| `https_port`   | `8738`    | trusted-LAN HTTPS listener (only started when `remote_access` is on) |
 | `page_size`    | `200`     | Drive files.list page size                          |
 | `selected_drives` | `[]`   | Shared Drive ids included in the library            |
 | `drive_sections` | `{}`    | drive id → `entertainment`\|`courses`\|`podcasts`\|custom |
@@ -484,7 +505,8 @@ rebuilds):
 
 - The server binds to `127.0.0.1` by default; the opt-in remote-access mode
   binds to your LAN/tailnet and requires a secret token on every non-local
-  request.
+  request. The LAN URL is served over HTTPS from a locally-generated CA
+  (keys in `~/Library/Application Support/drivecast/certs/`, owner-only).
 - Operations are keyed by Drive **file id**, so filenames with quotes/unicode
   are handled safely.
 - Shared-drive queries always set `supportsAllDrives` / `includeItemsFromAllDrives`.

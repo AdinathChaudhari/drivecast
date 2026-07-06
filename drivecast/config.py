@@ -40,6 +40,7 @@ DEFAULTS = {
     # OpenSubtitles when an API key is configured in secrets).
     "subtitles": True,
     "port": 8737,
+    "https_port": 8738,               # trusted-LAN HTTPS listener (remote access)
     "page_size": 200,
     # Library upgrade:
     "selected_drives": [],            # Shared Drive ids to include (empty = none yet)

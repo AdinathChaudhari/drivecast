@@ -231,6 +231,21 @@ tap the home-screen icon. The token itself is compared with
 `hmac.compare_digest` rather than a plain `==`, so a network attacker can't
 guess it one character at a time by timing how fast the comparison fails.
 
+There's one more hoop, courtesy of modern Safari: it increasingly refuses
+plain `http://` addresses outright (HTTPS-Only mode), and no public
+certificate authority will ever sign a certificate for a private address
+like `192.168.1.23`. So drivecast becomes its own tiny certificate
+authority. On the first remote-access launch it shells out to the Mac's
+built-in `openssl`, creates a private root CA plus a server certificate
+covering the Mac's names and addresses, and opens a second, TLS-wrapped
+listener (port 8738) serving the very same app. Trust that root once on
+your phone — the Settings card walks you through installing the profile
+and checking its SHA-256 fingerprint first — and the Wi-Fi URL becomes
+real, padlock-and-all HTTPS. The CA's private key never leaves
+`~/Library/Application Support/drivecast/certs/`; if the Mac's LAN address
+changes, a fresh server certificate is minted at the next launch while the
+root you trusted stays the same, so the phone never has to be set up twice.
+
 One asymmetry is deliberate: `/api/play` — the endpoint that launches
 mpv/VLC **on your Mac** — refuses any request that isn't from loopback, full
 stop. A phone must never be able to pop a video player open on your desktop

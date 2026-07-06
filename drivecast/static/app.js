@@ -197,6 +197,12 @@ function countEpisodes(rec) {
   return n;
 }
 
+// Real seasons only — extras pseudo-seasons (Featurettes/...) are listed in
+// the season picker but never counted or shuffled as part of the show.
+function realSeasons(rec) {
+  return (rec.seasons || []).filter((s) => !s.extras);
+}
+
 // Fraction of a show/course's episodes marked watched (0..1).
 function courseProgress(rec) {
   let total = 0, done = 0;
@@ -255,7 +261,7 @@ function titleCard(rec) {
     badge = rec.type === "show" ? `<span class="badge tv">TV</span>` : "";
     pill = qualityPill(rec);
     sub = rec.type === "show"
-      ? `${(rec.seasons || []).length} season${(rec.seasons || []).length === 1 ? "" : "s"}`
+      ? `${realSeasons(rec).length} season${realSeasons(rec).length === 1 ? "" : "s"}`
       : (rec.year || "");
   }
   card.innerHTML = `
@@ -583,7 +589,7 @@ function detailHeader(rec) {
   const p = posterMarkup(rec);
   const sec = sectionOf(rec);
   const n = nomen(rec);
-  const count = (rec.seasons || []).length;
+  const count = realSeasons(rec).length;
   let subBits = [];
   if (rec.year) subBits.push(String(rec.year));
   if (rec.type === "show" && count)
@@ -715,10 +721,12 @@ function queueItem(ep) {
            media: ep.media || null };
 }
 
-// Every playable episode across all seasons, in order.
+// Every playable episode across all REAL seasons, in order. Extras
+// pseudo-seasons are excluded so shuffle/resume never wander into featurettes
+// (their episodes still play + queue from the episode list itself).
 function allEpisodes(rec) {
   const eps = [];
-  for (const s of rec.seasons || [])
+  for (const s of realSeasons(rec))
     for (const e of s.episodes || []) if (e.file_id) eps.push(e);
   return eps;
 }

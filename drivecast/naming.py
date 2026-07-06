@@ -51,12 +51,20 @@ _EP_SHORT_RE = re.compile(r"\bE0*(\d+)\b", re.IGNORECASE)
 # Files that are not the feature/episode itself.
 _SAMPLE_RE = re.compile(r"\b(?:sample|trailer|featurette|extra|extras)\b", re.IGNORECASE)
 
-# Subfolder names that hold bonus material, not the feature — skipped when a
-# folder is expanded into movies (case-insensitive, exact folder name).
-_EXTRAS_FOLDERS = {
+# Subfolder names that hold bonus material, not the feature (case-insensitive,
+# exact folder name). Bonus folders carry watchable extras that belong INSIDE
+# their title (a "Featurettes" pseudo-season); discard folders never hold
+# playable library content at all.
+_BONUS_FOLDERS = {
     "featurettes", "extras", "bonus", "behind the scenes", "deleted scenes",
-    "sample", "samples", "subs", "subtitles", "trailers",
+    "trailers",
 }
+_DISCARD_FOLDERS = {"sample", "samples", "subs", "subtitles"}
+_EXTRAS_FOLDERS = _BONUS_FOLDERS | _DISCARD_FOLDERS
+
+# Inside a bonus folder "featurette"/"trailer" in a filename IS the content,
+# so only the word "sample" marks a file as junk there.
+_STRICT_SAMPLE_RE = re.compile(r"\bsample\b", re.IGNORECASE)
 
 # Junk detection: files/folders that must never become library content.
 # AppleDouble twins ("._foo.mkv") carry REAL video mimetypes on Drive, so
@@ -94,6 +102,22 @@ _ENUM_PREFIX_RE = re.compile(r"^\s*(?:\d{1,3}\s*[).\-]\s+|\d{1,3}\.(?=[A-Za-z]))
 def is_extras_folder(name):
     """True if a folder name denotes bonus material (featurettes/extras/...)."""
     return (name or "").strip().lower() in _EXTRAS_FOLDERS
+
+
+def is_bonus_folder(name):
+    """True if a folder holds watchable bonus material (featurettes/extras/...)."""
+    return (name or "").strip().lower() in _BONUS_FOLDERS
+
+
+def is_discard_folder(name):
+    """True if a folder never holds library content (samples/subs)."""
+    return (name or "").strip().lower() in _DISCARD_FOLDERS
+
+
+def is_strict_sample(name):
+    """True only for real sample files (used inside bonus folders, where
+    'featurette'/'trailer' in a filename is the content, not junk)."""
+    return bool(_STRICT_SAMPLE_RE.search(name or ""))
 
 
 def is_junk(name):

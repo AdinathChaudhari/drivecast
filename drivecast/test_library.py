@@ -663,6 +663,144 @@ def test_group_passthrough_strips_transient_keys():
     assert "_folder_name" not in out[0] and "_video_name" not in out[0]
 
 
+# --------------------------------------------------- extras / featurettes ------
+
+def test_show_featurettes_subfolder_becomes_extras_season():
+    # Show/Featurettes videos become a labelled pseudo-season, NOT season-1
+    # episodes mixed in with the real ones.
+    feats = node("Featurettes", [
+        vid("f1", "Behind the Couch.mkv", parent="ft",
+            ancestors=["Frasier", "Featurettes"]),
+        vid("f2", "Celebrity Voices.mkv", parent="ft",
+            ancestors=["Frasier", "Featurettes"]),
+    ], fid="ft")
+    s1 = node("Season 1", [
+        vid("e1", "Frasier S01E01.mkv", parent="s1", ancestors=["Frasier", "Season 1"]),
+        vid("e2", "Frasier S01E02.mkv", parent="s1", ancestors=["Frasier", "Season 1"]),
+    ], fid="s1")
+    rec = only(library.classify_node(node("Frasier", [], subfolders=[s1, feats])))
+    assert rec["type"] == "show"
+    real = [s for s in rec["seasons"] if not s.get("extras")]
+    extras = [s for s in rec["seasons"] if s.get("extras")]
+    assert len(real) == 1 and len(real[0]["episodes"]) == 2
+    assert len(extras) == 1
+    assert extras[0]["name"] == "Featurettes"
+    assert [e["file_id"] for e in extras[0]["episodes"]] == ["f1", "f2"]
+    assert rec["seasons"][-1] is extras[0]  # extras listed after real seasons
+
+
+def test_discard_folders_dropped_and_featurette_filenames_kept():
+    # Subs/Sample folder videos vanish; a file NAMED "...featurette..." inside
+    # a bonus folder is content, not junk.
+    feats = node("Featurettes", [
+        vid("f1", "Making Of featurette.mkv", parent="ft"),
+        vid("f2", "Episode 1 sample.mkv", parent="ft"),  # real sample: dropped
+    ], fid="ft")
+    subs = node("Subs", [vid("x1", "S01E01.forced.mkv", parent="sb")], fid="sb")
+    s1 = node("Season 1", [
+        vid("e1", "Show S01E01.mkv", parent="s1"),
+        vid("e2", "Show S01E02.mkv", parent="s1"),
+    ], fid="s1")
+    rec = only(library.classify_node(node("Show", [], subfolders=[s1, feats, subs])))
+    all_ids = [e["file_id"] for s in rec["seasons"] for e in s["episodes"]]
+    assert "x1" not in all_ids and "f2" not in all_ids
+    extras = [s for s in rec["seasons"] if s.get("extras")]
+    assert [e["file_id"] for e in extras[0]["episodes"]] == ["f1"]
+
+
+def test_root_featurettes_folder_attaches_to_drive_show():
+    # The real-world layout: a drive that IS the show (bare Season N folders)
+    # with a sibling Featurettes/Season N tree. No separate tile survives.
+    s1 = node("Season 1", [
+        vid("e1", "Frasier S01E01.mkv", parent="s1", ancestors=["Season 1"]),
+        vid("e2", "Frasier S01E02.mkv", parent="s1", ancestors=["Season 1"]),
+    ], fid="s1")
+    s2 = node("Season 2", [
+        vid("e3", "Frasier S02E01.mkv", parent="s2", ancestors=["Season 2"]),
+        vid("e4", "Frasier S02E02.mkv", parent="s2", ancestors=["Season 2"]),
+    ], fid="s2")
+    feat = node("Featurettes", [], subfolders=[
+        node("Season 1", [vid("f1", "Behind the Couch.mkv", parent="fs1",
+                              ancestors=["Featurettes", "Season 1"])], fid="fs1"),
+        node("Season 2", [vid("f2", "And Then There Was Eddie.mkv", parent="fs2",
+                              ancestors=["Featurettes", "Season 2"])], fid="fs2"),
+    ], fid="feat")
+    records = (library.classify_node(s1) + library.classify_node(s2)
+               + library.classify_node(feat))
+    main, extras = library.split_extras_records(records)
+    assert [r["id"] for r in extras] == ["feat"]
+    out = library.attach_extras(
+        library.group_seasons(main, {"drv1": "Fraiser"}), extras)
+    assert len(out) == 1
+    show = out[0]
+    assert show["title"] == "Fraiser"
+    real = [s for s in show["seasons"] if not s.get("extras")]
+    ex = [s for s in show["seasons"] if s.get("extras")]
+    assert [s["season"] for s in real] == [1, 2]
+    assert [s["name"] for s in ex] == ["Featurettes · Season 1",
+                                       "Featurettes · Season 2"]
+    assert [e["file_id"] for s in ex for e in s["episodes"]] == ["f1", "f2"]
+
+
+def test_root_extras_leaf_with_loose_clips_attaches_as_one_entry():
+    # An extras folder holding loose clips classifies as one movie per file;
+    # attach folds them back into a single labelled entry on the show.
+    show = only(library.classify_node(node("Frasier", [
+        vid("e1", "Frasier S01E01.mkv"),
+        vid("e2", "Frasier S01E02.mkv"),
+    ], fid="sh")))
+    clips = library.classify_node(node("Extras", [
+        vid("c2", "Clip 2.mkv", parent="ex"),
+        vid("c1", "Clip 1.mkv", parent="ex"),
+    ], fid="ex"))
+    main, extras = library.split_extras_records([show] + clips)
+    assert len(extras) == 2  # one movie record per clip
+    out = library.attach_extras(library.group_seasons(main, {}), extras)
+    assert len(out) == 1
+    ex = [s for s in out[0]["seasons"] if s.get("extras")]
+    assert len(ex) == 1 and ex[0]["name"] == "Extras"
+    assert [e["name"] for e in ex[0]["episodes"]] == ["Clip 1.mkv", "Clip 2.mkv"]
+    assert [e["episode"] for e in ex[0]["episodes"]] == [1, 2]
+
+
+def test_extras_stay_a_tile_when_drive_show_is_ambiguous():
+    # Two shows on the drive: guessing the owner would be worse than a tile.
+    a = only(library.classify_node(node("Show A", [
+        vid("a1", "Show A S01E01.mkv"), vid("a2", "Show A S01E02.mkv")], fid="A")))
+    b = only(library.classify_node(node("Show B", [
+        vid("b1", "Show B S01E01.mkv"), vid("b2", "Show B S01E02.mkv")], fid="B")))
+    feat = only(library.classify_node(node("Featurettes", [
+        vid("f1", "Bloopers S01E01.mkv"), vid("f2", "Bloopers S01E02.mkv")],
+        fid="ft")))
+    main, extras = library.split_extras_records([a, b, feat])
+    out = library.attach_extras(library.group_seasons(main, {}), extras)
+    assert {r["id"] for r in out} == {"A", "B", "ft"}
+    tile = next(r for r in out if r["id"] == "ft")
+    assert "_folder_name" not in tile  # leftover tile is still persistable
+
+
+def test_member_season_folder_extras_survive_group_seasons():
+    # "<Show> Season N" folder with its own Featurettes subfolder: the merge
+    # keeps the featurettes as a labelled pseudo-season of the merged show.
+    n = node("Frasier Season 2", [
+        vid("e1", "Frasier S02E01.mkv", parent="s2"),
+        vid("e2", "Frasier S02E02.mkv", parent="s2"),
+    ], subfolders=[node("Featurettes", [
+        vid("f1", "And Then There Was Eddie.mkv", parent="ft")], fid="ft")],
+        fid="s2")
+    rec = only(library.classify_node(n))
+    out = library.group_seasons([rec], {})
+    assert len(out) == 1
+    show = out[0]
+    assert show["title"] == "Frasier"
+    real = [s for s in show["seasons"] if not s.get("extras")]
+    ex = [s for s in show["seasons"] if s.get("extras")]
+    assert len(real) == 1 and real[0]["season"] == 2
+    assert [e["file_id"] for e in real[0]["episodes"]] == ["e1", "e2"]
+    assert len(ex) == 1 and ex[0]["name"] == "Featurettes · Season 2"
+    assert [e["file_id"] for e in ex[0]["episodes"]] == ["f1"]
+
+
 # --------------------------------------------------- per-drive refresh (M1) ----
 
 def _two_drive_tree():

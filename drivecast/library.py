@@ -194,6 +194,67 @@ def _all_videos(node):
     return out
 
 
+def _split_videos(node):
+    """Split a node's descendant videos into (main, bonus) structurally.
+
+    Videos under a bonus-named subfolder (Featurettes/Extras/...) come back
+    separately as (folder_label, video) pairs so they become labelled extras
+    pseudo-seasons instead of polluting the show's real seasons. Discard
+    folders (Sample/Subs/...) are dropped outright.
+    """
+    main = list(node["videos"])
+    bonus = []
+    for sf in node["subfolders"]:
+        if naming.is_discard_folder(sf["name"]):
+            continue
+        if naming.is_bonus_folder(sf["name"]):
+            label = (sf["name"] or "").strip() or "Extras"
+            bonus.extend((label, v) for v in _all_videos(sf))
+        else:
+            m, b = _split_videos(sf)
+            main.extend(m)
+            bonus.extend(b)
+    return main, bonus
+
+
+def _extras_label(label, season, multi):
+    """Display name for an extras pseudo-season ("Featurettes · Season 2")."""
+    if not multi:
+        return label
+    return "%s · %s" % (label, "Specials" if season == 0 else "Season %d" % season)
+
+
+def _extras_seasons(bonus):
+    """Build labelled pseudo-seasons from (label, video) bonus pairs.
+
+    One entry per (label, source season) so per-season featurettes stay
+    distinguishable. Entries carry "extras": True so the UI can list them in
+    the season picker without counting them as real seasons.
+    """
+    buckets = {}
+    for label, v in bonus:
+        if naming.is_strict_sample(v["name"]):
+            continue
+        buckets.setdefault((label, _season_of(v)), []).append(v)
+    label_counts = {}
+    for label, _ in buckets:
+        label_counts[label] = label_counts.get(label, 0) + 1
+    entries = []
+    for label, s in sorted(buckets, key=lambda k: (k[0].lower(), k[1])):
+        vids = buckets[(label, s)]
+        vids.sort(key=lambda v: (
+            naming.episode_number(v["name"]) if naming.episode_number(v["name"]) is not None else 10 ** 6,
+            v["name"].lower(),
+        ))
+        entries.append({
+            "season": s,
+            "name": _extras_label(label, s, label_counts[label] > 1),
+            "extras": True,
+            "episodes": [_episode_record(v, label, i + 1) for i, v in enumerate(vids)],
+        })
+    return entries
+
+
 def _is_show(node):
     """True if a folder node is a TV show.
 
@@ -211,13 +272,23 @@ def _is_show(node):
 
 
 def _show_record(node):
-    """Build one show record from a node's descendant videos, or None if empty."""
-    videos = [v for v in _all_videos(node) if not naming.is_sample(v["name"])]
-    if not videos:
+    """Build one show record from a node's descendant videos, or None if empty.
+
+    Bonus subfolders (Featurettes/Extras/...) become labelled extras
+    pseudo-seasons appended after the real seasons, so a show's featurettes
+    live inside the show instead of leaking into season 1.
+    """
+    main, bonus = _split_videos(node)
+    videos = [v for v in main if not naming.is_sample(v["name"])]
+    extras = _extras_seasons(bonus)
+    if not videos and not extras:
         return None
     title, year = naming.clean_title(node["name"])
     # Best quality across all episodes so the tile advertises the best available.
     quality = naming.best_quality(v["name"] for v in videos) or naming.detect_quality(node["name"])
+    thumb = next((v.get("thumb") for v in videos if v.get("thumb")), None)
+    if thumb is None:
+        thumb = next((v.get("thumb") for _, v in bonus if v.get("thumb")), None)
     return {
         "id": node["id"],
         "type": "show",
@@ -233,8 +304,8 @@ def _show_record(node):
         # "<Show> Season N" / bare "Season N" siblings. Stripped before persisting.
         "_folder_name": node["name"],
         # First available Drive thumbnail; poster fallback when TMDB has none.
-        "_thumb": next((v.get("thumb") for v in videos if v.get("thumb")), None),
-        "seasons": _group_episodes(videos, title),
+        "_thumb": thumb,
+        "seasons": _group_episodes(videos, title) + extras,
     }
 
 
@@ -394,10 +465,16 @@ def _norm_key(name):
 
 
 def _episodes_of(rec, fallback_season):
-    """Flatten a member record's videos into episode dicts (movie -> 1 episode)."""
+    """Flatten a member record's videos into episode dicts (movie -> 1 episode).
+
+    Extras pseudo-seasons are skipped: group_seasons carries them through
+    separately so a member's featurettes never mix into the merged seasons.
+    """
     if rec.get("type") == "show":
         eps = []
         for s in rec.get("seasons", []):
+            if s.get("extras"):
+                continue
             eps.extend(s.get("episodes", []))
         return eps
     return [{
@@ -463,11 +540,23 @@ def group_seasons(records, drive_names):
     for key in order:
         g = groups[key]
         buckets = {}
+        extras_entries = []
         best_q, best_q_rank = None, 0
         thumb = None
         member_drives = []
         for season_num, rec in g["members"]:
             buckets.setdefault(season_num, []).extend(_episodes_of(rec, season_num))
+            # A member season-folder's own extras (e.g. "Show Season 2/
+            # Featurettes") survive the merge as labelled pseudo-seasons.
+            for s in (rec.get("seasons") or []) if rec.get("type") == "show" else []:
+                if not s.get("extras"):
+                    continue
+                entry = dict(s)
+                if season_num is not None and "·" not in (entry.get("name") or ""):
+                    entry["name"] = _extras_label(entry.get("name") or "Extras",
+                                                  season_num, True)
+                    entry["season"] = season_num
+                extras_entries.append(entry)
             r = naming.quality_rank(rec.get("quality"))
             if r > best_q_rank:
                 best_q, best_q_rank = rec.get("quality"), r
@@ -482,6 +571,9 @@ def group_seasons(records, drive_names):
             eps.sort(key=lambda e: (e.get("episode") if e.get("episode") is not None else 10 ** 6,
                                     (e.get("name") or "").lower()))
             seasons.append({"season": s, "episodes": eps})
+        extras_entries.sort(key=lambda e: ((e.get("name") or "").lower(),
+                                           e.get("season") or 0))
+        seasons.extend(extras_entries)
         merged.append({
             "id": "grp:" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:16],
             "type": "show",
@@ -507,6 +599,97 @@ def _strip_transient(records):
         rec.pop("_folder_name", None)
         rec.pop("_video_name", None)
     return records
+
+
+# ------------------------------------------------------------ extras folding --
+
+def split_extras_records(records):
+    """Partition classified records into (main, extras) lists.
+
+    A record whose source folder is bonus-named — a top-level "Featurettes"/
+    "Extras" folder that classified as its own show or movie(s) — is an extras
+    record: attach_extras() folds it into the show it sits beside instead of
+    letting it surface as a library tile.
+    """
+    main, extras = [], []
+    for rec in records:
+        if naming.is_bonus_folder(rec.get("_folder_name") or ""):
+            extras.append(rec)
+        else:
+            main.append(rec)
+    return main, extras
+
+
+def attach_extras(records, extras_records):
+    """Fold standalone extras records into the show they sit beside.
+
+    Runs AFTER group_seasons, so a drive laid out as bare "Season N" folders
+    plus a sibling "Featurettes" folder attaches to the merged drive-show.
+    Target: the single show record sourced from the extras record's drive.
+    With no (or several) candidate shows the extras record keeps its own tile
+    — better a stray tile than featurettes attached to the wrong show.
+    """
+    if not extras_records:
+        return records
+    shows_by_drive = {}
+    for rec in records:
+        if rec.get("type") != "show":
+            continue
+        drives = rec.get("source_drives") or (
+            [rec["drive_id"]] if rec.get("drive_id") else [])
+        for d in drives:
+            shows_by_drive.setdefault(d, []).append(rec)
+
+    # One extras folder can classify as several records (a leaf folder with
+    # loose clips expands one movie per file) — regroup by (drive, folder).
+    groups = {}
+    order = []
+    for ex in extras_records:
+        key = (ex.get("drive_id"), (ex.get("_folder_name") or "Extras").strip())
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(ex)
+
+    leftovers = []
+    for drive_id, label in order:
+        members = groups[(drive_id, label)]
+        targets = shows_by_drive.get(drive_id) or []
+        if len(targets) != 1:
+            leftovers.extend(members)
+            continue
+        target = targets[0]
+        target["seasons"] = (list(target.get("seasons") or [])
+                             + _extras_entries(members, label))
+    return records + _strip_transient(leftovers)
+
+
+def _extras_entries(members, label):
+    """Convert an extras folder's records into labelled pseudo-seasons."""
+    show_entries = []
+    loose_eps = []
+    for rec in members:
+        if rec.get("type") == "show":
+            show_entries.extend(s for s in rec.get("seasons") or []
+                                if s.get("episodes"))
+        else:
+            loose_eps.extend(_episodes_of(rec, 1))
+    multi = (len(show_entries) + (1 if loose_eps else 0)) > 1
+    entries = []
+    for s in show_entries:
+        entries.append({
+            "season": s["season"],
+            "name": _extras_label(label, s["season"], multi),
+            "extras": True,
+            "episodes": s["episodes"],
+        })
+    if loose_eps:
+        loose_eps.sort(key=lambda e: (e.get("name") or "").lower())
+        for i, e in enumerate(loose_eps):
+            e["episode"] = i + 1
+        entries.append({"season": 1, "name": label, "extras": True,
+                        "episodes": loose_eps})
+    return entries
 
 
 # ----------------------------------------------------------------------- diff --
@@ -975,7 +1158,11 @@ class Scanner:
                    if r.get("section", "entertainment") == "entertainment"]
             rest = [r for r in all_records
                     if r.get("section", "entertainment") != "entertainment"]
-            grouped = group_seasons(ent, drive_names) + _strip_transient(rest)
+            # Standalone extras folders (a drive-root "Featurettes" beside the
+            # show's season folders) fold into their show after grouping.
+            ent, ent_extras = split_extras_records(ent)
+            grouped = attach_extras(group_seasons(ent, drive_names), ent_extras)
+            grouped = grouped + _strip_transient(rest)
             new_titles = {rec["id"]: rec for rec in grouped}
             for rec in new_titles.values():
                 rec.setdefault("section", "entertainment")

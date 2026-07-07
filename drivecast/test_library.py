@@ -630,16 +630,19 @@ def test_group_bare_season_folders_uses_drive_name():
     assert sorted(s["season"] for s in out[0]["seasons"]) == [1, 2]
 
 
-def test_group_merges_show_split_across_drives():
-    # Malcolm in the Middle split into Part 1 / Part 2 drives, bare seasons.
+def test_bare_season_drives_stay_separate_shows():
+    # Two Part drives, each with bare "Season N" folders, no longer merge:
+    # drive-is-the-show groups key on the immutable drive id (rename-stable),
+    # so two same-named such drives stay two distinct shows.
     recs = [_showrec("a", "dM1", "Season 1", 1, 16),
             _showrec("b", "dM2", "Season 5", 5, 22)]
     names = {"dM1": "TV | Malcom in the Middle (Part 1)",
              "dM2": "TV | Malcom in the Middle (Part 2)"}
     out = library.group_seasons(recs, names)
-    assert len(out) == 1
-    assert out[0]["title"] == "Malcom in the Middle"
-    assert sorted(s["season"] for s in out[0]["seasons"]) == [1, 5]
+    assert len(out) == 2
+    assert {r["title"] for r in out} == {"Malcom in the Middle"}
+    assert {r["drive_id"] for r in out} == {"dM1", "dM2"}
+    assert len({r["id"] for r in out}) == 2   # distinct, drive-id-derived
 
 
 def test_group_leaves_range_named_wrapper_untouched():
@@ -833,9 +836,10 @@ def test_partial_refresh_equals_full_refresh(tmp_path):
     assert scanner.status["total"] == 1
 
 
-def test_partial_refresh_preserves_cross_drive_grouped_show(tmp_path):
-    # A show split across two "Part" drives groups into one grp: record; a
-    # partial refresh of either drive must keep BOTH seasons.
+def test_partial_refresh_preserves_bare_season_drives(tmp_path):
+    # Two "Part" drives with bare "Season N" folders are now SEPARATE shows
+    # (keyed by immutable drive id). A partial refresh of either must keep both,
+    # with their ids unchanged.
     tree = {
         "dM1": [rawfolder("s1F", "Season 1")],
         "s1F": [rawfile("m1e1", "ep1.mkv"), rawfile("m1e2", "ep2.mkv")],
@@ -852,17 +856,18 @@ def test_partial_refresh_preserves_cross_drive_grouped_show(tmp_path):
     scanner = library.Scanner(_NamedAPI(tree), _DisabledTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
     asyncio.run(scanner.scan(["dM1", "dM2"]))
-    rec = only(lib.titles_list())
-    assert rec["id"].startswith("grp:")
-    assert sorted(s["season"] for s in rec["seasons"]) == [1, 5]
-    assert set(rec["source_drives"]) == {"dM1", "dM2"}
-    grp_id = rec["id"]
+    recs = lib.titles_list()
+    assert len(recs) == 2
+    by_drive = {r["drive_id"]: r for r in recs}
+    assert sorted(by_drive) == ["dM1", "dM2"]
+    assert all(r["id"].startswith("grp:") for r in recs)
+    ids = {d: r["id"] for d, r in by_drive.items()}
 
-    # Refresh only Part 2: the grouped show keeps both seasons, same id.
+    # Refresh only Part 2: both shows survive with unchanged ids.
     asyncio.run(scanner.scan(["dM1", "dM2"], scope=["dM2"]))
-    rec2 = only(lib.titles_list())
-    assert rec2["id"] == grp_id
-    assert sorted(s["season"] for s in rec2["seasons"]) == [1, 5]
+    recs2 = lib.titles_list()
+    assert len(recs2) == 2
+    assert {r["drive_id"]: r["id"] for r in recs2} == ids
 
 
 def test_scan_failure_keeps_previous_titles(tmp_path):
@@ -943,9 +948,14 @@ def test_scan_cache_get_returns_deep_copies(tmp_path):
 
 def test_category_for_matrix():
     from drivecast import sections
-    # No TMDB match -> other, unless a drive hint overrides.
+    # No TMDB match -> other for non-shows, but a structural show never falls
+    # back to "other" (it stays a "show"); a drive hint still overrides both.
     assert sections.category_for(None, "movie") == "other"
+    assert sections.category_for(None, "movie", None) == "other"
+    assert sections.category_for(None, "show", None) == "show"
+    assert sections.category_for(None, "show") == "show"
     assert sections.category_for(None, "show", "documentary") == "documentary"
+    assert sections.category_for(None, "movie", "documentary") == "documentary"
     # Genre 99 -> documentary regardless of structure.
     assert sections.category_for({"genre_ids": [18, 99]}, "movie") == "documentary"
     assert sections.category_for({"genre_ids": [99]}, "show") == "documentary"
@@ -1038,6 +1048,99 @@ def test_category_null_when_tmdb_disabled(tmp_path):
                               cache=_cache(tmp_path))
     asyncio.run(scanner.scan(["drv1"]))
     assert only(lib.titles_list())["category"] is None
+
+
+class _MissTMDB:
+    """TMDB stub that is enabled but never matches (every lookup is a miss)."""
+    enabled = True
+
+    async def enrich(self, title, year=None, media_type="movie"):
+        return None
+
+
+def _bare_season_tree(drive_id):
+    return {
+        drive_id: [rawfolder("s1F", "Season 1"), rawfolder("s2F", "Season 2")],
+        "s1F": [rawfile("e1", "ep1.mkv")],
+        "s2F": [rawfile("e2", "ep1.mkv")],
+    }
+
+
+def test_bare_season_show_survives_drive_rename(tmp_path, monkeypatch):
+    # Renaming a drive-is-the-show between scans keeps the record id stable
+    # (so carried metadata isn't dropped), updates the DISPLAY title to the new
+    # name, and — even with no TMDB match — keeps category "show", not "other".
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+
+    class _RenamableAPI(_FakeScanAPI):
+        drive_name = "Frasier"
+
+        async def list_drives(self, force=False):
+            return [{"id": "dSH", "name": self.drive_name}]
+
+    api = _RenamableAPI(_bare_season_tree("dSH"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(api, _MissTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["dSH"]))
+    rec = only(lib.titles_list())
+    assert rec["title"] == "Frasier"
+    assert rec["category"] == "show"     # structural show, no TMDB fallback
+    first_id = rec["id"]
+
+    # Rename the drive and rescan: same id, new title, still "show".
+    api.drive_name = "Frasier Reboot"
+    asyncio.run(scanner.scan(["dSH"]))
+    rec2 = only(lib.titles_list())
+    assert rec2["id"] == first_id
+    assert rec2["title"] == "Frasier Reboot"
+    assert rec2["category"] == "show"
+
+
+def test_stuck_other_show_self_heals_on_rescan(tmp_path, monkeypatch):
+    # A show record already poisoned with category "other" (no drive-hint
+    # override) heals back to "show" on the next scan, without any TMDB hit.
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+
+    class _NamedAPI(_FakeScanAPI):
+        async def list_drives(self, force=False):
+            return [{"id": "dSH", "name": "Frasier"}]
+
+    api = _NamedAPI(_bare_season_tree("dSH"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(api, _MissTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["dSH"]))
+    rec = only(lib.titles_list())
+    # Simulate the poisoned state persisted by the old bug.
+    lib.get(rec["id"])["category"] = "other"
+    assert lib.get(rec["id"])["category"] == "other"
+
+    asyncio.run(scanner.scan(["dSH"]))
+    healed = only(lib.titles_list())
+    assert healed["id"] == rec["id"]     # same title -> id stable, no rename
+    assert healed["category"] == "show"
+
+
+def test_stuck_other_show_respects_drive_hint_over_self_heal(tmp_path, monkeypatch):
+    # The self-heal must not override an explicit drive category hint.
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+
+    class _NamedAPI(_FakeScanAPI):
+        async def list_drives(self, force=False):
+            return [{"id": "dSH", "name": "Frasier"}]
+
+    api = _NamedAPI(_bare_season_tree("dSH"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(api, _MissTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    hints = {"dSH": {"category": "other"}}
+    asyncio.run(scanner.scan(["dSH"], drive_hints=hints))
+    rec = only(lib.titles_list())
+    lib.get(rec["id"])["category"] = "other"
+
+    asyncio.run(scanner.scan(["dSH"], drive_hints=hints))
+    assert only(lib.titles_list())["category"] == "other"
 
 
 # ------------------------------------------------------- sections (M3) --------

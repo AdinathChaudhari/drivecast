@@ -492,11 +492,13 @@ def group_seasons(records, drive_names):
     """Merge sibling season-folders (and single-show drives) into one show each.
 
     Handles the two layouts that otherwise show one tile per season:
-      * bare "Season N" top-level folders  -> the DRIVE is the show (name = drive)
+      * bare "Season N" top-level folders  -> the DRIVE is the show; keyed by
+        the immutable drive id, so renaming the drive keeps the show's record
+        id stable (only its display title follows the new name). Two same-named
+        such drives therefore stay separate shows rather than merging.
       * "<Show> Season N" sibling folders  -> grouped by the shared show prefix
     Nested "Show/Season N" folders already classify correctly and pass through.
-    Records sharing a normalised key merge across drives too (e.g. a show split
-    into "... (Part 1)" / "(Part 2)" drives).
+    Prefixed-folder shows sharing a normalised key merge across drives too.
     """
     groups = {}          # key -> {"display","drive_id","year","members":[(season,rec)]}
     order = []           # preserve first-seen ordering for stable output
@@ -512,7 +514,11 @@ def group_seasons(records, drive_names):
         if fname is not None:
             ps = naming.pure_season(fname)
             if ps is not None:
-                key = _norm_key(drive_name) or ("drive:" + str(drive_id))
+                # The drive IS the show: key on the immutable drive id so a
+                # drive rename can't change the persisted record id (which would
+                # drop all carried metadata). The display title still follows
+                # the current drive name so renames stay visible on rescan.
+                key = "drive:" + str(drive_id)
                 display = _clean_show_name(drive_name) or "Unknown"
                 season_num = ps
             else:
@@ -719,6 +725,12 @@ def merge_existing_metadata(old_titles, new_titles):
         # fallback forever.
         if ((old.get("section") or "entertainment")
                 != (rec.get("section") or "entertainment")):
+            continue
+        # Same id, different title = a rename (drive-is-the-show groups keep
+        # their id across a drive rename). The old poster/tmdb/overview/category
+        # described the OLD name; drop them so they recompute against the new
+        # title instead of carrying stale enrichment forever.
+        if (old.get("title") or "") != (rec.get("title") or ""):
             continue
         for k in ("poster", "tmdb_id", "overview", "category"):
             if old.get(k) and not rec.get(k):
@@ -1214,6 +1226,19 @@ class Scanner:
                     except Exception:  # pragma: no cover - defensive
                         continue
                     rec["category"] = sections.category_for(meta, rec["type"], hint)
+
+            # Self-heal: a structurally-detected show stuck at "other" (poisoned
+            # by an earlier drive rename that changed its id and dropped it back
+            # through TMDB's negative-lookup path) resets to "show", unless the
+            # drive explicitly overrides its category. Runs with TMDB off too so
+            # already-poisoned libraries recover; needs no TMDB call.
+            for rec in new_titles.values():
+                if rec.get("section", "entertainment") != "entertainment":
+                    continue
+                if rec.get("type") == "show" and rec.get("category") == "other":
+                    hint = ((drive_hints or {}).get(rec.get("drive_id")) or {}).get("category")
+                    if not hint:
+                        rec["category"] = "show"
 
             # Titles TMDB couldn't cover fall back to the video's own Drive
             # thumbnail (also the only poster source when TMDB is disabled).

@@ -153,14 +153,16 @@ def category_for(meta, structural_type, hint_category=None):
     """Entertainment category from a TMDB enrich() result.
 
     meta is the cached TMDB dict (or None for a negative lookup):
-      * None       -> the hint category if configured, else "other"
+      * None       -> the hint category if configured, else the structural type
+                      ("show" for shows) so a structurally-detected show never
+                      falls back to "other"; non-shows fall back to "other"
       * genre 99   -> "documentary" (movies and TV alike)
       * otherwise  -> the structural type ("show" for shows, "movie" else)
     Callers skip this entirely when TMDB is disabled (category stays None and
     the UI falls back to the structural type).
     """
     if meta is None:
-        return hint_category or "other"
+        return hint_category or ("show" if structural_type == "show" else "other")
     if TMDB_DOCUMENTARY_GENRE in (meta.get("genre_ids") or []):
         return "documentary"
     return "show" if structural_type == "show" else "movie"

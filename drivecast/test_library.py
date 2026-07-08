@@ -99,9 +99,11 @@ def test_container_of_movie_folders_expands_to_one_tile_each():
     assert {r["file_id"] for r in recs} == {"f1", "f2"}
 
 
-def test_extras_subfolder_is_ignored():
-    # A movie folder with a Featurettes extras subfolder is still one movie.
-    extras = node("Featurettes", [vid("x", "Behind the scenes.mkv")], fid="exF")
+def test_movie_featurettes_attached():
+    # A movie folder with a Featurettes subfolder is still ONE movie, but its
+    # bonus clips ride along on the record's `extras` field (not discarded).
+    extras = node("Featurettes", [vid("x", "Behind the scenes.mkv", parent="exF")],
+                  fid="exF")
     movie = node("Blade - Trinity (2004) [1080p]",
                  [vid("m", "Blade.Trinity.2004.1080p.mkv")],
                  subfolders=[extras], fid="bladeF")
@@ -109,6 +111,73 @@ def test_extras_subfolder_is_ignored():
     assert rec["type"] == "movie"
     assert rec["title"] == "Blade - Trinity"
     assert rec["file_id"] == "m"
+    assert [e["file_id"] for g in rec["extras"] for e in g["episodes"]] == ["x"]
+    assert rec["extras"][0]["name"] == "Featurettes"
+    assert rec["extras"][0]["extras"] is True
+
+
+def test_movie_discard_subfolder_still_dropped():
+    # Sample/Subs subfolders contribute nothing — no extras, still one movie.
+    subs = node("Subs", [vid("s1", "movie.en.srt.mkv", parent="sb")], fid="sb")
+    movie = node("Arrival (2016) [1080p]",
+                 [vid("m", "Arrival.2016.1080p.mkv")],
+                 subfolders=[subs], fid="arrF")
+    rec = only(library.classify_node(movie))
+    assert rec["type"] == "movie"
+    assert rec.get("extras") in (None, [])
+
+
+def test_broadened_bonus_folders_attach():
+    # The widened vocabulary ("Special Features", "Making Of") is recognised.
+    sf = node("Special Features", [vid("s1", "Cast interview.mkv", parent="sfF")],
+              fid="sfF")
+    mk = node("Making Of", [vid("m1", "On set.mkv", parent="mkF")], fid="mkF")
+    movie = node("Some Film (2010) [1080p]",
+                 [vid("m", "Some.Film.2010.1080p.mkv")],
+                 subfolders=[sf, mk], fid="sfilmF")
+    rec = only(library.classify_node(movie))
+    names = {g["name"] for g in rec["extras"]}
+    assert names == {"Special Features", "Making Of"}
+
+
+def test_collection_extras_fan_out():
+    # A collection folder with three film subfolders + a SHARED Featurettes
+    # folder: three movie records, each carrying the identical (deep-copied,
+    # not shared-reference) extras group.
+    m1 = node("Film One (1995) [1080p]", [vid("a", "Film.One.1995.1080p.mkv")], fid="f1F")
+    m2 = node("Film Two (2004) [1080p]", [vid("b", "Film.Two.2004.1080p.mkv")], fid="f2F")
+    m3 = node("Film Three (2013) [1080p]", [vid("c", "Film.Three.2013.1080p.mkv")], fid="f3F")
+    feats = node("Featurettes", [
+        vid("x1", "Making Of.mkv", parent="ftF"),
+        vid("x2", "Cast Reunion.mkv", parent="ftF"),
+    ], fid="ftF")
+    coll = node("A Trilogy", [], subfolders=[m1, m2, m3, feats], fid="collF")
+    recs = library.classify_node(coll)
+    assert {r["title"] for r in recs} == {"Film One", "Film Two", "Film Three"}
+    assert all(r["type"] == "movie" for r in recs)
+    for r in recs:
+        assert {e["file_id"] for g in r["extras"] for e in g["episodes"]} == {"x1", "x2"}
+    # Deep-copied, not the same list object across records.
+    assert recs[0]["extras"] is not recs[1]["extras"]
+
+
+def test_collection_film_own_extras_preserved_alongside_shared():
+    # A film with its OWN Featurettes inside a collection that also has a shared
+    # one keeps both (its own is not clobbered by the fan-out).
+    own = node("Featurettes", [vid("o1", "Director commentary.mkv", parent="ownF")],
+               fid="ownF")
+    m1 = node("Film One (1995) [1080p]",
+              [vid("a", "Film.One.1995.1080p.mkv")], subfolders=[own], fid="f1F")
+    m2 = node("Film Two (2004) [1080p]", [vid("b", "Film.Two.2004.1080p.mkv")], fid="f2F")
+    shared = node("Extras", [vid("s1", "Trilogy retrospective.mkv", parent="shF")],
+                  fid="shF")
+    coll = node("A Duology", [], subfolders=[m1, m2, shared], fid="collF")
+    recs = library.classify_node(coll)
+    by_title = {r["title"]: r for r in recs}
+    f1_ids = [e["file_id"] for g in by_title["Film One"]["extras"] for e in g["episodes"]]
+    assert set(f1_ids) == {"o1", "s1"}          # its own + the shared extra
+    f2_ids = [e["file_id"] for g in by_title["Film Two"]["extras"] for e in g["episodes"]]
+    assert f2_ids == ["s1"]                       # only the shared extra
 
 
 def test_container_with_stray_videos_and_subfolders():
@@ -780,6 +849,64 @@ def test_extras_stay_a_tile_when_drive_show_is_ambiguous():
     assert {r["id"] for r in out} == {"A", "B", "ft"}
     tile = next(r for r in out if r["id"] == "ft")
     assert "_folder_name" not in tile  # leftover tile is still persistable
+
+
+def test_drive_root_single_movie_extras_attach():
+    # A drive root with exactly one loose movie + a root Featurettes folder:
+    # the clips fold onto that movie's `extras` field, no separate tile.
+    movie = only(library.classify_loose(
+        "drv1", [rawfile("m", "Some Film 2010 1080p.mkv", size=5000)]))
+    clips = library.classify_node(node("Featurettes", [
+        vid("c2", "Clip 2.mkv", parent="ex"),
+        vid("c1", "Clip 1.mkv", parent="ex"),
+    ], fid="ex"))
+    main, extras = library.split_extras_records([movie] + clips)
+    out = library.attach_extras(library.group_seasons(main, {}), extras)
+    assert len(out) == 1
+    tgt = out[0]
+    assert tgt["type"] == "movie" and tgt["file_id"] == "m"
+    assert len(tgt["extras"]) == 1 and tgt["extras"][0]["name"] == "Featurettes"
+    assert [e["name"] for e in tgt["extras"][0]["episodes"]] == ["Clip 1.mkv", "Clip 2.mkv"]
+
+
+def test_drive_root_multi_movie_extras_leftover():
+    # Two loose movies + a root Featurettes folder: owner is ambiguous, so the
+    # Featurettes stays a standalone tile (no incorrect attach, no crash).
+    movies = library.classify_loose("drv1", [
+        rawfile("m1", "Film A 2001 1080p.mkv"),
+        rawfile("m2", "Film B 2002 1080p.mkv"),
+    ])
+    clips = library.classify_node(node("Featurettes", [
+        vid("c1", "Clip 1.mkv", parent="ex")], fid="ex"))
+    main, extras = library.split_extras_records(movies + clips)
+    out = library.attach_extras(library.group_seasons(main, {}), extras)
+    assert {r["file_id"] for r in out} == {"m1", "m2", "c1"}
+    for r in out:
+        assert not r.get("extras")
+
+
+def test_movie_extras_playable_via_rebuild_index(tmp_path):
+    # A movie's featurette file must be resolvable for playback/HEAD + history.
+    movie = {
+        "id": "m", "type": "movie", "title": "Some Film", "file_id": "m",
+        "size": 5000, "duration_ms": 360000, "drive_id": "drv1", "folder_id": "fF",
+        "extras": [{
+            "season": 1, "name": "Featurettes", "extras": True,
+            "episodes": [{
+                "title": "Making Of", "episode": 1, "file_id": "x1",
+                "name": "Making Of.mkv", "duration_ms": 60000, "size": 100,
+                "parent_id": "ftF",
+            }],
+        }],
+    }
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    lib.replace({"m": movie})
+    info = lib.file_info("x1")
+    assert info is not None
+    assert info["name"] == "Making Of.mkv"
+    assert info["drive_id"] == "drv1" and info["parent_id"] == "ftF"
+    owner = lib.title_for_file("x1")
+    assert owner is not None and owner["id"] == "m"
 
 
 def test_member_season_folder_extras_survive_group_seasons():

@@ -612,7 +612,7 @@ function detailHeader(rec) {
 }
 
 function renderMovieDetail(rec) {
-  $("detailBody").innerHTML = detailHeader(rec);
+  $("detailBody").innerHTML = detailHeader(rec) + `<div id="movieExtras"></div>`;
   const actions = $("detailActions");
   const play = document.createElement("button");
   play.className = "btn primary";
@@ -621,6 +621,47 @@ function renderMovieDetail(rec) {
     { id: rec.file_id, name: rec.title, drive_id: rec.drive_id, parent_id: rec.folder_id },
     rec.duration_ms || null, false, [], rec.media || null));
   actions.appendChild(play);
+  renderMovieExtras(rec);
+}
+
+// Movie featurettes/extras: labelled groups of bonus clips shown below the
+// Play button. Each clip plays as a SINGLE item (no autoplay queue), so a
+// featurette never chains into another clip or the feature.
+function renderMovieExtras(rec) {
+  const box = $("movieExtras");
+  if (!box) return;
+  box.innerHTML = "";
+  const groups = (rec.extras || []).filter((g) => (g.episodes || []).length);
+  if (!groups.length) return;
+  groups.forEach((g) => {
+    const head = document.createElement("h3");
+    head.className = "materials-head";
+    head.textContent = g.name || "Extras";
+    box.appendChild(head);
+    const list = document.createElement("div");
+    list.className = "episodes";
+    (g.episodes || []).forEach((ep) => {
+      if (!ep.file_id) return;
+      const row = document.createElement("div");
+      row.className = "episode";
+      const prog = state.progress[ep.file_id] || {};
+      if (prog.watched) row.classList.add("watched");
+      const mark = prog.watched ? `<span class="ep-done">✓</span>`
+        : (ep.media === "audio" ? `<span class="ep-audio">♪</span>` : "");
+      const pct = !prog.watched && prog.percent > 2
+        ? `<div class="progress"><span style="width:${Math.min(98, prog.percent)}%"></span></div>` : "";
+      row.innerHTML = `
+        <span class="ep-num"></span>
+        <span class="ep-title">${escapeHTML(ep.title || ep.name)}</span>
+        <span class="ep-dur">${ep.duration_ms ? fmtTime(ep.duration_ms / 1000) : ""}</span>
+        <span class="ep-play">${mark || "▶"}</span>${pct}`;
+      row.addEventListener("click", () => playFile(
+        { id: ep.file_id, name: ep.name, drive_id: rec.drive_id, parent_id: ep.parent_id },
+        ep.duration_ms || null, false, [], ep.media || null));
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+  });
 }
 
 function renderShowDetail(rec) {

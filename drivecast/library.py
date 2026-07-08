@@ -13,6 +13,7 @@ Design split:
     library, prunes orphaned posters, and writes atomically.
 """
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -336,6 +337,21 @@ def _movie_record(node, video, from_folder):
     }
 
 
+def _movie_extras(node):
+    """Labelled extras pseudo-season entries from a movie node's bonus
+    subfolders (Featurettes/Extras/Trailers/...), or [] when there are none.
+
+    Reuses the exact machinery the show path uses (_extras_seasons); discard
+    folders (Sample/Subs) contribute nothing.
+    """
+    pairs = []
+    for sf in node["subfolders"]:
+        if naming.is_bonus_folder(sf["name"]):
+            label = (sf["name"] or "").strip() or "Extras"
+            pairs.extend((label, v) for v in _all_videos(sf))
+    return _extras_seasons(pairs)
+
+
 def _expand_movies(node):
     """Expand a non-show node into movie records, recursing into subfolders.
 
@@ -343,21 +359,46 @@ def _expand_movies(node):
       named from the FOLDER; multiple videos -> one movie per video (file-named).
     * container (has non-extras subfolders): each stray direct video becomes a
       file-named movie, plus the recursion into each non-extras subfolder.
-    Extras subfolders (Featurettes/Extras/...) are ignored entirely.
+    Bonus subfolders (Featurettes/Extras/...) become an ``extras`` list on the
+    movie record(s) instead of being discarded: attached to the single film for
+    a per-movie folder, or fanned onto every sibling film for a collection
+    folder with a shared bonus folder (e.g. a trilogy's shared Featurettes).
+    Discard subfolders (Sample/Subs) are still dropped entirely.
     """
     direct = [v for v in node["videos"] if not naming.is_sample(v["name"])]
     subs = [sf for sf in node["subfolders"] if not naming.is_extras_folder(sf["name"])]
+    extras = _movie_extras(node)
 
     if not subs:
         if not direct:
             return []
         if len(direct) == 1:
-            return [_movie_record(node, direct[0], from_folder=True)]
-        return [_movie_record(node, v, from_folder=False) for v in direct]
+            rec = _movie_record(node, direct[0], from_folder=True)
+            if extras:
+                rec["extras"] = extras
+            return [rec]
+        recs = [_movie_record(node, v, from_folder=False) for v in direct]
+        for rec in recs:
+            if extras:
+                rec["extras"] = copy.deepcopy(extras)
+        return recs
 
     records = [_movie_record(node, v, from_folder=False) for v in direct]
     for sf in subs:
         records.extend(classify_node(sf))
+    # A collection folder with a SHARED bonus folder beside the film subfolders:
+    # fan the extras onto every film the recursion produced (appended, so a
+    # film's own Featurettes folder is preserved). If the recursion yielded a
+    # single show instead, the shared extras fold into it as pseudo-seasons.
+    if extras:
+        movies = [r for r in records if r.get("type") == "movie"]
+        shows = [r for r in records if r.get("type") == "show"]
+        if movies:
+            for r in movies:
+                r["extras"] = list(r.get("extras") or []) + copy.deepcopy(extras)
+        elif len(shows) == 1:
+            shows[0]["seasons"] = (list(shows[0].get("seasons") or [])
+                                   + copy.deepcopy(extras))
     return records
 
 
@@ -638,13 +679,16 @@ def attach_extras(records, extras_records):
     if not extras_records:
         return records
     shows_by_drive = {}
+    movies_by_drive = {}
     for rec in records:
-        if rec.get("type") != "show":
-            continue
         drives = rec.get("source_drives") or (
             [rec["drive_id"]] if rec.get("drive_id") else [])
-        for d in drives:
-            shows_by_drive.setdefault(d, []).append(rec)
+        if rec.get("type") == "show":
+            for d in drives:
+                shows_by_drive.setdefault(d, []).append(rec)
+        elif rec.get("type") == "movie":
+            for d in drives:
+                movies_by_drive.setdefault(d, []).append(rec)
 
     # One extras folder can classify as several records (a leaf folder with
     # loose clips expands one movie per file) — regroup by (drive, folder).
@@ -660,13 +704,20 @@ def attach_extras(records, extras_records):
     leftovers = []
     for drive_id, label in order:
         members = groups[(drive_id, label)]
-        targets = shows_by_drive.get(drive_id) or []
-        if len(targets) != 1:
+        shows = shows_by_drive.get(drive_id) or []
+        movies = movies_by_drive.get(drive_id) or []
+        # Prefer a single show on the drive; else a single loose movie gets the
+        # extras on its own `extras` field. Anything ambiguous stays a tile.
+        if len(shows) == 1:
+            target = shows[0]
+            target["seasons"] = (list(target.get("seasons") or [])
+                                 + _extras_entries(members, label))
+        elif not shows and len(movies) == 1:
+            target = movies[0]
+            target["extras"] = (list(target.get("extras") or [])
+                                + _extras_entries(members, label))
+        else:
             leftovers.extend(members)
-            continue
-        target = targets[0]
-        target["seasons"] = (list(target.get("seasons") or [])
-                             + _extras_entries(members, label))
     return records + _strip_transient(leftovers)
 
 
@@ -821,6 +872,20 @@ class Library:
                     "parent_id": rec.get("folder_id"),  # the movie's folder
                 }
                 owners[rec["file_id"]] = rec.get("id")
+                # Featurettes/extras clips are playable too: index their files
+                # so play/HEAD lookups and history resolve to the movie.
+                for grp in rec.get("extras") or []:
+                    for ep in grp.get("episodes", []):
+                        if ep.get("file_id"):
+                            idx[ep["file_id"]] = {
+                                "name": ep.get("name"),
+                                "size": ep.get("size"),
+                                "duration_ms": ep.get("duration_ms"),
+                                "media": ep.get("media") or "video",
+                                "drive_id": rec.get("drive_id"),
+                                "parent_id": ep.get("parent_id"),
+                            }
+                            owners[ep["file_id"]] = rec.get("id")
             elif rec.get("type") == "show":
                 for season in rec.get("seasons", []):
                     for ep in season.get("episodes", []):
@@ -899,6 +964,12 @@ class Library:
             if rec.get("type") == "movie" and rec.get("file_id"):
                 api.seed_meta(self._meta(rec["file_id"], rec.get("title"),
                                          rec.get("size"), rec.get("duration_ms")))
+                for grp in rec.get("extras") or []:
+                    for ep in grp.get("episodes", []):
+                        if ep.get("file_id"):
+                            api.seed_meta(self._meta(
+                                ep["file_id"], ep.get("name"),
+                                ep.get("size"), ep.get("duration_ms")))
             elif rec.get("type") == "show":
                 for season in rec.get("seasons", []):
                     for ep in season.get("episodes", []):

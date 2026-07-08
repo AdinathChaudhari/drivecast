@@ -53,9 +53,11 @@ folder (`Phase 1`, `Hollywood`, `Blade Series`, `The Godfather Series`, …) tha
 holds many films — as loose files or one-movie subfolders, possibly nested —
 surfaces **each film as its own tile** rather than one wrong tile named after the
 folder. Bonus-material subfolders (`Featurettes`, `Extras`, `Behind the Scenes`,
-…) are ignored, and a leading enumeration prefix (`01) `, `01.`, `1 - `) is
-stripped from titles. TV shows (season subfolders or episode-marked files) are
-still detected and kept as a single show tile.
+`Special Features`, …) become a movie's **Extras** — a list of bonus clips shown
+below the Play button, just like a show's featurette pseudo-seasons (a collection's
+*shared* bonus folder appears on every film in it). A leading enumeration prefix
+(`01) `, `01.`, `1 - `) is stripped from titles. TV shows (season subfolders or
+episode-marked files) are still detected and kept as a single show tile.
 
 **Robust season detection.** Season subfolders survive messy release naming.
 Beyond `Season 1` / `S01`, drivecast de-noises a folder name (dropping bracketed

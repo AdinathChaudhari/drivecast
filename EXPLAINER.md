@@ -345,10 +345,14 @@ classifies each folder **recursively**:
     into its own tile — so a `Phase 1` folder yields *Iron Man*, *The Incredible
     Hulk*, *Thor*, … rather than one bogus `Phase 1` tile.
   - **Bonus-material subfolders** (`Featurettes`, `Extras`, `Bonus`, `Behind the
-    Scenes`, `Deleted Scenes`, `Sample(s)`, `Subs`, `Subtitles`, `Trailers`) are
-    skipped, and a leading **enumeration prefix** (`01) `, `01.`, `1 - `) is
-    stripped from titles (without touching real leading numbers like *2 Fast 2
-    Furious* or *1917*).
+    Scenes`, `Deleted Scenes`, `Trailers`, `Special Features`, `Making Of`, …)
+    become the movie's **`extras`** — labelled groups of bonus clips carried on
+    the record (the same pseudo-season shape shows use), so a film's featurettes
+    are one click away instead of discarded. A collection folder's *shared* bonus
+    folder fans out onto every film it contains. Only **discard** folders
+    (`Sample(s)`, `Subs`, `Subtitles`) hold no library content and are dropped. A
+    leading **enumeration prefix** (`01) `, `01.`, `1 - `) is stripped from titles
+    (without touching real leading numbers like *2 Fast 2 Furious* or *1917*).
 - Loose videos sitting at a drive's root are parsed by filename: `SxxExx` files
   group into a show; everything else is a standalone movie.
 

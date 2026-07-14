@@ -8,6 +8,8 @@ import os
 import secrets
 import socket
 import subprocess
+import time
+import urllib.parse
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -60,6 +62,7 @@ class AppState:
         self.setup_error = None  # populated by preflight if rclone is unusable
         self._refresh_task = None
         self._pending_scope = set()  # scopes requested while a scan was running
+        self.stream_activity = {}  # file_id -> epoch of last GET /stream request
 
     def start_refresh(self, scope=None):
         """Kick a background library scan, if idle.
@@ -125,6 +128,59 @@ class AppState:
         await self.streamer.aclose()
         await self.tmdb.aclose()
         await self.subtitles.aclose()
+
+
+def _playlist_entries(rec, start=None, shuffle=False, seed=0):
+    """Build the canonical ordered playlist entries for a title record.
+
+    Mirrors the Fire TV app's own queue-flattening exactly, so the m3u the
+    server emits and the queue the app builds locally agree episode-for-
+    episode: extras seasons are skipped, movies contribute their single
+    file, and `start`/`shuffle` slice/reorder identically on both sides.
+    """
+    entries = []
+    if rec.get("type") == "show":
+        show_title = rec.get("title")
+        for s in rec.get("seasons", []):
+            if s.get("extras"):
+                continue
+            season_num = s.get("season")
+            for ep in s.get("episodes", []):
+                file_id = ep.get("file_id")
+                if not file_id:
+                    continue
+                ep_num = ep.get("episode")
+                ep_title = ep.get("title") or ep.get("name") or file_id
+                if season_num is not None and ep_num is not None:
+                    label = "%s · S%02dE%02d · %s" % (show_title, season_num, ep_num, ep_title)
+                else:
+                    label = ep_title
+                entries.append({
+                    "file_id": file_id,
+                    "label": label,
+                    "duration_ms": ep.get("duration_ms"),
+                })
+    elif rec.get("type") == "movie":
+        file_id = rec.get("file_id")
+        if file_id:
+            entries.append({
+                "file_id": file_id,
+                "label": rec.get("title"),
+                "duration_ms": rec.get("duration_ms"),
+            })
+
+    if shuffle:
+        from .shuffle import seeded_shuffle
+        entries = seeded_shuffle(entries, seed)
+    # Slice to the start episode AFTER any shuffle, so an up-next relaunch that
+    # passes ?start=<next episode> resumes the shuffled order at that episode
+    # rather than replaying from the top. (App and server shuffle identically,
+    # so the sliced suffix matches the app's queue position.)
+    if start:
+        idx = next((i for i, e in enumerate(entries) if e["file_id"] == start), None)
+        if idx is not None:
+            entries = entries[idx:]
+    return entries
 
 
 def _drive_error_response(e):
@@ -282,6 +338,44 @@ def create_app(cfg=None):
             return JSONResponse({"error": "not_found"}, status_code=404)
         return rec
 
+    @app.get("/api/playlist/{title_id}.m3u")
+    async def api_playlist_m3u(title_id: str, request: Request,
+                               start: str = None, shuffle: int = 0, seed: int = 0):
+        """M3U playlist for a title, in the exact order the Fire TV app's own
+        queue would play it (see _playlist_entries). Declared BEFORE the JSON
+        twin below: starlette matches routes in declaration order and
+        `{title_id}` ([^/]+) would otherwise swallow the ".m3u" suffix."""
+        state = app.state.dc
+        rec = state.library.get(title_id)
+        if not rec:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        entries = _playlist_entries(rec, start, bool(shuffle), seed)
+        base = str(request.base_url).rstrip("/")
+        token = state.cfg.get("remote_token") or ""
+        suffix = ("?token=" + urllib.parse.quote(token)) if token else ""
+        lines = ["#EXTM3U", "#PLAYLIST:" + (rec.get("title") or title_id)]
+        for e in entries:
+            dur = e.get("duration_ms")
+            lines.append("#EXTINF:%d,%s" % (int(dur / 1000) if dur else -1, e["label"]))
+            lines.append("%s/stream/%s%s" % (base, e["file_id"], suffix))
+        return Response("\n".join(lines) + "\n", media_type="audio/x-mpegurl")
+
+    @app.get("/api/playlist/{title_id}")
+    async def api_playlist_json(title_id: str, request: Request,
+                                start: str = None, shuffle: int = 0, seed: int = 0):
+        """JSON twin of the m3u above (same order for identical params) — the
+        app fetches this to learn the exact queue it should build locally."""
+        state = app.state.dc
+        rec = state.library.get(title_id)
+        if not rec:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        entries = _playlist_entries(rec, start, bool(shuffle), seed)
+        return {
+            "title_id": title_id,
+            "items": [{"file_id": e["file_id"], "name": e["label"],
+                      "duration_ms": e.get("duration_ms")} for e in entries],
+        }
+
     @app.post("/api/refresh")
     async def api_refresh(request: Request):
         state = app.state.dc
@@ -436,7 +530,19 @@ def create_app(cfg=None):
                 return await state.streamer.head(file_id)
             except DriveAPIError as e:
                 return _drive_error_response(e)
+        state.stream_activity[file_id] = time.time()
+        if len(state.stream_activity) > 64:
+            del state.stream_activity[min(state.stream_activity, key=state.stream_activity.get)]
         return await state.streamer.stream(file_id, request)
+
+    @app.get("/api/stream/recent")
+    async def api_stream_recent():
+        """Recently-streamed file_ids, most-recent first — lets the app learn
+        which episode a next-episode/shuffle playlist actually landed on."""
+        state = app.state.dc
+        now = time.time()
+        items = sorted(state.stream_activity.items(), key=lambda kv: kv[1], reverse=True)[:25]
+        return {"now": now, "items": [{"file_id": fid, "ts": ts, "age": now - ts} for fid, ts in items]}
 
     # ---- keep-awake ("Are you still watching?") ----
     # Behind the normal auth middleware (no exemptions): the TV app will adopt

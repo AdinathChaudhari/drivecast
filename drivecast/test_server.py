@@ -32,11 +32,26 @@ SYNTHETIC = {
             "id": "showB", "type": "show", "title": "The Bear", "year": 2022,
             "drive_id": "drv1", "folder_id": "showB", "poster": "bear.jpg",
             "tmdb_id": None, "overview": "kitchen",
-            "seasons": [{"season": 1, "episodes": [
-                {"title": "System", "episode": 1, "file_id": "fileE1",
-                 "name": "The.Bear.S01E01.mkv", "duration_ms": 1500000,
-                 "size": 900, "parent_id": "s1"},
-            ]}],
+            "seasons": [
+                {"season": 1, "episodes": [
+                    {"title": "System", "episode": 1, "file_id": "fileE1",
+                     "name": "The.Bear.S01E01.mkv", "duration_ms": 1500000,
+                     "size": 900, "parent_id": "s1"},
+                    {"title": "Hands", "episode": 2, "file_id": "fileE2",
+                     "name": "The.Bear.S01E02.mkv", "duration_ms": 1400000,
+                     "size": 850, "parent_id": "s1"},
+                ]},
+                {"season": 2, "episodes": [
+                    {"title": "Emergency", "episode": 1, "file_id": "fileE3",
+                     "name": "The.Bear.S02E01.mkv", "duration_ms": 1600000,
+                     "size": 950, "parent_id": "s2"},
+                ]},
+                {"season": 0, "name": "Extras", "extras": True, "episodes": [
+                    {"title": "Behind the Scenes", "episode": 1, "file_id": "fileX1",
+                     "name": "Bear.Extras.mkv", "duration_ms": 300000,
+                     "size": 200, "parent_id": "sx"},
+                ]},
+            ],
         },
     },
 }
@@ -900,3 +915,134 @@ def test_subtitles_requires_token_for_remote(make_client):
     with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
         r = c.get("/api/subtitles/fileA")
         assert r.status_code == 401
+
+
+# ---- playlist (/api/playlist/{title}.m3u + JSON twin) / shuffle / stream activity ----
+
+def _extinf_urls(body):
+    """Just the stream-URL lines (skip #EXTM3U/#PLAYLIST/#EXTINF lines)."""
+    return [l for l in body.splitlines() if l.startswith("http")]
+
+
+def _file_ids(urls):
+    # http://testserver/stream/<file_id>[?token=...]
+    return [u.rsplit("/", 1)[-1].split("?", 1)[0] for u in urls]
+
+
+def test_playlist_m3u_full_show_order_and_extras_excluded(client):
+    r = client.get("/api/playlist/showB.m3u")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("audio/x-mpegurl")
+    body = r.text
+    assert body.startswith("#EXTM3U")
+    urls = _extinf_urls(body)
+    assert _file_ids(urls) == ["fileE1", "fileE2", "fileE3"]  # declared order, extras skipped
+    assert "fileX1" not in body
+    assert "#EXTINF:" in body
+    assert urls[0] == "http://testserver/stream/fileE1"
+
+
+def test_playlist_m3u_start_crosses_season_boundary(client):
+    r = client.get("/api/playlist/showB.m3u?start=fileE2")
+    assert r.status_code == 200
+    ids = _file_ids(_extinf_urls(r.text))
+    assert ids == ["fileE2", "fileE3"]  # fileE1 dropped, fileE3 (season 2) kept
+
+
+def test_playlist_m3u_unknown_start_returns_full_list(client):
+    r = client.get("/api/playlist/showB.m3u?start=bogus")
+    assert r.status_code == 200
+    ids = _file_ids(_extinf_urls(r.text))
+    assert ids == ["fileE1", "fileE2", "fileE3"]
+
+
+def test_playlist_m3u_bakes_token_for_remote(make_client):
+    with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
+        r = c.get("/api/playlist/showB.m3u?token=sekret")
+        assert r.status_code == 200
+        urls = _extinf_urls(r.text)
+        assert urls
+        assert all(u.endswith("?token=sekret") for u in urls)
+
+
+def test_playlist_m3u_omits_token_when_local_and_unset(client):
+    r = client.get("/api/playlist/showB.m3u")
+    assert "token=" not in r.text
+
+
+def test_playlist_m3u_shuffle_deterministic_and_seed_sensitive(client):
+    r1 = client.get("/api/playlist/showB.m3u?shuffle=1&seed=42")
+    r2 = client.get("/api/playlist/showB.m3u?shuffle=1&seed=42")
+    assert r1.status_code == 200
+    assert r1.text == r2.text  # same seed -> identical body
+    ids = _file_ids(_extinf_urls(r1.text))
+    assert set(ids) == {"fileE1", "fileE2", "fileE3"}
+    assert len(ids) == 3  # each episode exactly once
+
+    r3 = client.get("/api/playlist/showB.m3u?shuffle=1&seed=7")
+    ids3 = _file_ids(_extinf_urls(r3.text))
+    assert set(ids3) == set(ids)  # still every episode exactly once
+    assert ids3 != ids            # a different seed changes the order
+
+
+def test_playlist_m3u_shuffle_start_resumes_shuffled_suffix(client):
+    # An up-next relaunch passes ?start=<next episode>; the server must slice the
+    # SHUFFLED order at that episode (not replay from the top).
+    full = _file_ids(_extinf_urls(client.get("/api/playlist/showB.m3u?shuffle=1&seed=42").text))
+    assert len(full) == 3
+    start = full[1]
+    r = client.get(f"/api/playlist/showB.m3u?shuffle=1&seed=42&start={start}")
+    assert _file_ids(_extinf_urls(r.text)) == full[1:]
+
+
+def test_playlist_json_matches_m3u_order(client):
+    m3u_ids = _file_ids(_extinf_urls(client.get("/api/playlist/showB.m3u").text))
+    r = client.get("/api/playlist/showB")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["title_id"] == "showB"
+    assert [it["file_id"] for it in body["items"]] == m3u_ids
+    ep1 = next(it for it in body["items"] if it["file_id"] == "fileE1")
+    assert ep1["name"] and ep1["duration_ms"] == 1500000
+
+
+def test_playlist_unknown_title_404_both_routes(client):
+    assert client.get("/api/playlist/nope.m3u").status_code == 404
+    assert client.get("/api/playlist/nope").status_code == 404
+
+
+def test_playlist_movie_single_entry(client):
+    r = client.get("/api/playlist/movieA")
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert len(items) == 1
+    assert items[0]["file_id"] == "fileA"
+    assert items[0]["duration_ms"] == 7200000
+
+    r2 = client.get("/api/playlist/movieA.m3u")
+    assert _file_ids(_extinf_urls(r2.text)) == ["fileA"]
+
+
+def test_stream_recent_records_gets(client, monkeypatch):
+    from starlette.responses import Response as StarletteResponse
+
+    async def _fake_stream(file_id, request):
+        return StarletteResponse(status_code=200)
+
+    monkeypatch.setattr(client.app.state.dc.streamer, "stream", _fake_stream)
+    client.get("/stream/fileE1")
+    client.get("/stream/fileE2")
+    r = client.get("/api/stream/recent")
+    assert r.status_code == 200
+    body = r.json()
+    assert "now" in body
+    ids = [it["file_id"] for it in body["items"]]
+    assert ids[0] == "fileE2"  # most recent first
+    assert "fileE1" in ids
+    for it in body["items"]:
+        assert "ts" in it and it["age"] >= 0
+
+
+def test_stream_recent_requires_token_for_remote(make_client):
+    with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
+        assert c.get("/api/stream/recent").status_code == 401

@@ -264,7 +264,7 @@ The same remote surface powers a **native Fire TV / Android TV app**,
 repo, because it's a separate program (Kotlin + ExoPlayer) that just happens to
 speak drivecast's API. It needed almost nothing new from the server, which is
 the point: the JSON API plus the range-aware stream proxy already were a
-complete client contract. Two small additions closed the gaps:
+complete client contract. A few small additions closed the gaps:
 
 - `GET /api/ping` — the one deliberately **unauthenticated** endpoint. A TV
   has no camera for QR pairing, so the app instead probes the local network
@@ -275,6 +275,17 @@ complete client contract. Two small additions closed the gaps:
   in a *local file path*, which no remote player can use. This endpoint runs
   the same resolution and serves the winning file over HTTP with its real
   MIME type. No format conversion: ExoPlayer parses SRT/VTT/ASS natively.
+- `GET /api/playlist/{title_id}.m3u` (plus a JSON twin) — an ordered M3U of a
+  show's episodes with token-baked stream URLs, so when the app hands a show to
+  VLC it hands over a *playlist*, not one file, and VLC's own Next/Previous
+  buttons walk the season. `?start=<file_id>` trims it to that episode onward;
+  `?shuffle=1&seed=<n>` reorders it with the same SplitMix64 shuffle the app
+  runs, so both sides agree on order episode-for-episode.
+- `GET /api/stream/recent` — VLC returns the *playlist* URL when you quit, not
+  the episode you stopped on. This endpoint reports which files streamed most
+  recently, so the app can figure out where you actually were and report
+  progress against the right episode — Continue Watching stays honest even when
+  VLC drives the playlist itself.
 
 Because ExoPlayer decodes MKV and HEVC in hardware, the browser's format
 whitelist — and the whole VLC/Infuse handoff dance — simply doesn't exist on

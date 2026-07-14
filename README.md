@@ -236,6 +236,9 @@ player can't do:
 - **Made for a remote** — D-pad rows, focus scaling, media keys; a
   Netflix-style Home with the Continue Watching shelf (dismissable there
   too) and one row per section.
+- **Binge without lifting a finger** — when it hands a show to VLC it hands
+  over a *playlist* of the remaining episodes, so VLC's own Next/Previous walk
+  the season; there's also a Shuffle button for random-order play.
 - **Auto-discovery** — the app finds your Mac by probing the network for
   drivecast's unauthenticated `GET /api/ping`, so pairing is just typing the
   access token.

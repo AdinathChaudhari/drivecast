@@ -69,3 +69,132 @@ def test_save_config_never_writes_secret(tmp_path, monkeypatch):
     assert on_disk["selected_drives"] == ["x"]
     assert on_disk["port"] == 9000
     assert "tmdb_api_key" not in on_disk
+
+
+# ------------------------------------------------------------------- tabs -----
+# "tabs" is the source of truth for the nav bar (see sections.py); config.py
+# only owns its default/persistence and the one-time upgrade seam that seeds
+# it from a pre-tabs install's drive_sections.
+
+def test_tabs_in_defaults_and_saved_keys():
+    assert config.DEFAULTS["tabs"] == []
+    assert "tabs" in config.SAVED_KEYS
+
+
+def test_tabs_roundtrips_through_save_and_load(tmp_path, monkeypatch):
+    user_dir, _, _ = _redirect(monkeypatch, tmp_path)
+    user_dir.mkdir(parents=True)
+    tabs = [{"key": "entertainment", "label": "Entertainment", "icon": "🍿",
+             "behavior": "entertainment"}]
+    config.save_config({"tabs": tabs, "selected_drives": []})
+    cfg = config.load_config()
+    assert cfg["tabs"] == tabs
+
+
+def test_fresh_install_has_no_tabs_key_and_stays_empty(tmp_path, monkeypatch):
+    user_dir, _, _ = _redirect(monkeypatch, tmp_path)
+    # No config.json yet; config.example.json ships no "tabs" key and no
+    # selected_drives -> true zero-start, nothing seeded.
+    cfg = config.load_config()
+    assert cfg["tabs"] == []
+    on_disk = json.loads((user_dir / "config.json").read_text())
+    assert "tabs" not in on_disk  # migration was a no-op, nothing written
+
+
+# -------------------------------------------------------------- migrate_config --
+
+def test_migrate_config_noop_when_tabs_key_already_present():
+    cfg = {"tabs": [{"key": "x"}], "selected_drives": ["d1"],
+           "drive_sections": {"d1": "courses"}}
+    out, changed = config.migrate_config(dict(cfg), had_tabs_key=True)
+    assert changed is False
+    assert out["tabs"] == cfg["tabs"]  # untouched
+
+
+def test_migrate_config_noop_on_fresh_install():
+    cfg = {"tabs": [], "selected_drives": [], "drive_sections": {}}
+    out, changed = config.migrate_config(dict(cfg), had_tabs_key=False)
+    assert changed is False
+    assert out["tabs"] == []
+
+
+def test_migrate_config_seeds_entertainment_courses_podcasts_and_plugin(monkeypatch):
+    from drivecast import sections
+    monkeypatch.setattr(sections, "_plugins", {
+        "myaudio": {"key": "myaudio", "label": "My Audio", "icon": "♪",
+                 "accent": "#3b82f6", "accent2": "#93c5fd",
+                 "classify": lambda *a, **k: []},
+    })
+
+    cfg = {
+        "selected_drives": ["d1", "d2", "d3", "d4", "d5"],
+        "drive_sections": {
+            "d1": "entertainment",
+            "d2": "courses",
+            "d3": "podcasts",
+            "d4": "myaudio",
+            "d5": "not-a-real-section",
+            # d-unselected below must never surface in seeded tabs/drive_sections
+            "d-unselected": "courses",
+        },
+    }
+    out, changed = config.migrate_config(dict(cfg), had_tabs_key=False)
+
+    assert changed is True
+    seeded = {t["key"]: t for t in out["tabs"]}
+    assert set(seeded) == {"entertainment", "courses", "podcasts", "myaudio"}
+
+    assert seeded["entertainment"] == {
+        "key": "entertainment", "label": "Entertainment", "icon": "🍿",
+        "behavior": "entertainment",
+    }
+    assert seeded["courses"] == {
+        "key": "courses", "label": "Courses", "icon": "🎓", "behavior": "courses",
+        "accent": "#4ade80", "accent2": "#86efac",
+    }
+    assert seeded["podcasts"] == {
+        "key": "podcasts", "label": "Podcasts", "icon": "🎙", "behavior": "podcasts",
+        "accent": "#c084fc", "accent2": "#e0b3ff",
+    }
+    assert seeded["myaudio"] == {
+        "key": "myaudio", "label": "My Audio", "icon": "♪", "behavior": "myaudio",
+        "accent": "#3b82f6", "accent2": "#93c5fd",
+    }
+
+    # d5's value resolved to nothing we know how to render -> assignment
+    # dropped, then rule 3 gives it (and any bare drive) the default tab.
+    assert out["drive_sections"]["d1"] == "entertainment"
+    assert out["drive_sections"]["d2"] == "courses"
+    assert out["drive_sections"]["d3"] == "podcasts"
+    assert out["drive_sections"]["d4"] == "myaudio"
+    assert out["drive_sections"]["d5"] == "entertainment"
+    # d-unselected isn't in selected_drives, so rule 3 never touches it; its
+    # value happens to resolve ("courses" was seeded) so cleanup leaves it be.
+    assert out["drive_sections"]["d-unselected"] == "courses"
+
+
+def test_migrate_config_gives_selected_drive_without_entry_entertainment():
+    cfg = {"selected_drives": ["d1"], "drive_sections": {}}
+    out, changed = config.migrate_config(dict(cfg), had_tabs_key=False)
+    assert changed is True
+    assert out["drive_sections"]["d1"] == "entertainment"
+    assert out["tabs"] == [{"key": "entertainment", "label": "Entertainment",
+                             "icon": "🍿", "behavior": "entertainment"}]
+
+
+def test_migrate_config_is_idempotent_via_load_config_roundtrip(tmp_path, monkeypatch):
+    user_dir, _, _ = _redirect(monkeypatch, tmp_path)
+    user_dir.mkdir(parents=True)
+    (user_dir / "config.json").write_text(json.dumps({
+        "selected_drives": ["d1", "d2"],
+        "drive_sections": {"d1": "entertainment", "d2": "courses"},
+    }))
+
+    first = config.load_config()
+    assert {t["key"] for t in first["tabs"]} == {"entertainment", "courses"}
+    on_disk_after_first = json.loads((user_dir / "config.json").read_text())
+    assert "tabs" in on_disk_after_first  # migration persisted itself
+
+    second = config.load_config()
+    assert second["tabs"] == first["tabs"]
+    assert second["drive_sections"] == first["drive_sections"]

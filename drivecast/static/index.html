@@ -103,6 +103,36 @@
         <h3>Drives to include</h3>
         <p class="muted">Only content from the drives you pick appears in your library.</p>
         <div id="driveList" class="drive-list"></div>
+
+        <div class="tabs-manage">
+          <h4>Your tabs</h4>
+          <p class="muted">Tabs decide how your library is organized. Delete one and its
+            assigned drives fall back to "— choose a tab —" until you pick another.</p>
+          <div id="tabsManageList" class="tabs-manage-list"></div>
+
+          <div id="newSectionForm" class="new-section-form hidden">
+            <h4>Create a tab</h4>
+            <label class="ns-field">
+              <span>Name</span>
+              <input type="text" id="newSectionName" placeholder="e.g. Work Courses" required>
+            </label>
+            <label class="ns-field">
+              <span>Emoji</span>
+              <input type="text" id="newSectionIcon" placeholder="🎬" maxlength="8">
+              <span class="muted ns-hint">Cmd-Ctrl-Space for the emoji picker. Leave blank for the default.</span>
+            </label>
+            <label class="ns-field">
+              <span>Behaves like</span>
+              <select id="newSectionBehavior"></select>
+            </label>
+            <div class="ns-actions">
+              <button id="newSectionCreate" class="btn primary" type="button">Create</button>
+              <button id="newSectionCancel" class="btn ghost" type="button">Cancel</button>
+              <span id="newSectionMsg" class="muted"></span>
+            </div>
+          </div>
+        </div>
+
         <label class="toggle">
           <input type="checkbox" id="autoRefresh">
           <span>Auto-refresh library on launch</span>

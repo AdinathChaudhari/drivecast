@@ -613,6 +613,50 @@ def test_rescan_upgrades_dthumb_to_tmdb_poster(tmp_path, monkeypatch):
     assert not os.path.exists(old_file)  # superseded fallback cleaned up
 
 
+class _DownloadingTMDB:
+    """Enabled TMDB stub that materialises the poster file on disk (like the
+    real download) and counts enrich() calls."""
+    enabled = True
+
+    def __init__(self):
+        self.calls = 0
+
+    async def enrich(self, title, year=None, media_type="movie"):
+        self.calls += 1
+        os.makedirs(config.POSTERS_DIR, exist_ok=True)
+        with open(os.path.join(config.POSTERS_DIR, "tmdb.jpg"), "wb") as f:
+            f.write(b"img")
+        return {"tmdb_id": 1, "title": title, "year": year,
+                "poster_key": "tmdb.jpg", "overview": "o", "genre_ids": []}
+
+
+def test_rescan_redownloads_missing_tmdb_poster_file(tmp_path, monkeypatch):
+    # A title already carries a TMDB poster KEY but its cached image file was
+    # pruned (e.g. the title was reclassified into another tab) — a rescan must
+    # re-resolve and re-materialise the file, not leave a permanent placeholder.
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    tmdb = _DownloadingTMDB()
+
+    def scan_once():
+        asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), tmdb, lib,
+                    throttle=0, cache=_cache(tmp_path)
+                    ).scan(["drv1"], drive_sections=_ent("drv1")))
+
+    scan_once()
+    rec = lib.titles_list()[0]
+    pf = os.path.join(config.POSTERS_DIR, rec["poster"])
+    assert rec["poster"] == "tmdb.jpg" and os.path.exists(pf)
+    calls_after_first = tmdb.calls
+
+    os.remove(pf)                         # poster file goes missing, key stays
+    scan_once()
+    rec = lib.titles_list()[0]
+    assert rec["poster"] == "tmdb.jpg"
+    assert os.path.exists(pf)             # re-downloaded on rescan
+    assert tmdb.calls > calls_after_first  # the dangling key was re-resolved
+
+
 def test_tmdb_match_without_artwork_keeps_dthumb(tmp_path, monkeypatch):
     class _NoArtTMDB:
         enabled = True
@@ -864,7 +908,8 @@ def test_root_extras_leaf_with_loose_clips_attaches_as_one_entry():
 
 
 def test_extras_stay_a_tile_when_drive_show_is_ambiguous():
-    # Two shows on the drive: guessing the owner would be worse than a tile.
+    # Two equally-small shows, extras season overlaps both: a genuine near-tie
+    # (no strict season-overlap winner, no 2x episode lead) stays a tile.
     a = only(library.classify_node(node("Show A", [
         vid("a1", "Show A S01E01.mkv"), vid("a2", "Show A S01E02.mkv")], fid="A")))
     b = only(library.classify_node(node("Show B", [
@@ -911,6 +956,92 @@ def test_drive_root_multi_movie_extras_leftover():
     assert {r["file_id"] for r in out} == {"m1", "m2", "c1"}
     for r in out:
         assert not r.get("extras")
+
+
+def test_root_featurettes_attaches_to_dominant_show_among_two():
+    # A drive with a dominant seven-season show (grouped "Season N" folders) + a
+    # smaller second show + a root "Featurettes" folder whose season subfolders
+    # {1,2,3,11} tie both shows on overlap. Episode dominance (21 vs 6, >= 2x)
+    # folds the featurettes into the dominant show; the second show is untouched;
+    # no standalone Featurettes tile survives.
+    big = [node("Harborview Season %d" % s,
+                [vid("hv%d_%d" % (s, e), "Harborview S%02dE%02d.mkv" % (s, e))
+                 for e in range(1, 4)], fid="hv%d" % s)
+           for s in range(1, 8)]
+    small = node("Night Market", [
+        vid("nm%d_%d" % (s, e), "Night Market S%02dE%02d.mkv" % (s, e))
+        for s in range(1, 4) for e in range(1, 3)], fid="nm")
+    feat = node("Featurettes", [], subfolders=[
+        node("Season 1", [vid("g1", "BTS 1.mkv", parent="gs1",
+                              ancestors=["Featurettes", "Season 1"])], fid="gs1"),
+        node("Season 2", [vid("g2", "BTS 2.mkv", parent="gs2",
+                              ancestors=["Featurettes", "Season 2"])], fid="gs2"),
+        node("Season 3", [vid("g3", "BTS 3.mkv", parent="gs3",
+                              ancestors=["Featurettes", "Season 3"])], fid="gs3"),
+        node("Season 11", [vid("g11", "BTS 11.mkv", parent="gs11",
+                               ancestors=["Featurettes", "Season 11"])], fid="gs11"),
+    ], fid="feat")
+    records = []
+    for f in big + [small, feat]:
+        records += library.classify_node(f)
+    main, extras = library.split_extras_records(records)
+    assert [r["id"] for r in extras] == ["feat"]
+    out = library.attach_extras(library.group_seasons(main, {}), extras)
+    assert not any(r.get("id") == "feat" for r in out)   # no stray tile
+    dominant = next(r for r in out
+                    if len([s for s in r["seasons"] if not s.get("extras")]) == 7)
+    ex = [s for s in dominant["seasons"] if s.get("extras")]
+    assert [s["name"] for s in ex] == [
+        "Featurettes · Season 1", "Featurettes · Season 2",
+        "Featurettes · Season 3", "Featurettes · Season 11"]
+    second = next(r for r in out
+                  if len([s for s in r["seasons"] if not s.get("extras")]) == 3)
+    assert not any(s.get("extras") for s in second["seasons"])  # second untouched
+
+
+def test_root_extras_seasons_match_one_show():
+    # Equal-sized shows (dominance ties) with disjoint season ranges: a
+    # "Featurettes/Season 4" attaches to the show that HAS a season 4, purely
+    # on season overlap.
+    a = only(library.classify_node(node("Show A", [
+        vid("a1", "Show A S01E01.mkv"), vid("a2", "Show A S02E01.mkv")], fid="A")))
+    b = only(library.classify_node(node("Show B", [
+        vid("b1", "Show B S04E01.mkv"), vid("b2", "Show B S05E01.mkv")], fid="B")))
+    feat = only(library.classify_node(node("Featurettes", [], subfolders=[
+        node("Season 4", [vid("g1", "Clip.mkv", parent="gs4",
+                              ancestors=["Featurettes", "Season 4"])], fid="gs4")],
+        fid="ft")))
+    main, extras = library.split_extras_records([a, b, feat])
+    out = library.attach_extras(library.group_seasons(main, {}), extras)
+    assert not any(r.get("id") == "ft" for r in out)
+    b_out = next(r for r in out if r["title"] == "Show B")
+    # A single extras season keeps the bare folder label (the "· Season N"
+    # suffix only distinguishes multiple), and it went to B (has season 4).
+    b_extras = [s for s in b_out["seasons"] if s.get("extras")]
+    assert [s["name"] for s in b_extras] == ["Featurettes"]
+    assert [e["file_id"] for s in b_extras for e in s["episodes"]] == ["g1"]
+    a_out = next(r for r in out if r["title"] == "Show A")
+    assert not any(s.get("extras") for s in a_out["seasons"])
+
+
+def test_root_extras_near_tie_stays_tile():
+    # Comparable shows sharing seasons 1-3: neither season overlap nor a 2x
+    # episode lead decides (10 vs 9 eps), so the Featurettes stays its own tile.
+    a = only(library.classify_node(node("Show A", [
+        vid("a%d" % e, "Show A S%02dE%02d.mkv" % ((e - 1) // 4 + 1, (e - 1) % 4 + 1))
+        for e in range(1, 11)], fid="A")))     # 10 eps across seasons 1-3
+    b = only(library.classify_node(node("Show B", [
+        vid("b%d" % e, "Show B S%02dE%02d.mkv" % ((e - 1) // 3 + 1, (e - 1) % 3 + 1))
+        for e in range(1, 10)], fid="B")))     # 9 eps across seasons 1-3
+    feat = only(library.classify_node(node("Featurettes", [], subfolders=[
+        node("Season 1", [vid("g1", "Clip 1.mkv", parent="gs1")], fid="gs1"),
+        node("Season 2", [vid("g2", "Clip 2.mkv", parent="gs2")], fid="gs2")],
+        fid="ft")))
+    main, extras = library.split_extras_records([a, b, feat])
+    out = library.attach_extras(library.group_seasons(main, {}), extras)
+    assert {r["id"] for r in out} == {"A", "B", "ft"}
+    for r in out:
+        assert not any(s.get("extras") for s in r.get("seasons", []))
 
 
 def test_movie_extras_playable_via_rebuild_index(tmp_path):

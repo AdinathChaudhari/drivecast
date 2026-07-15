@@ -674,14 +674,56 @@ def split_extras_records(records):
     return main, extras
 
 
+# A root-level extras folder on a drive with several shows attaches to the
+# drive's headline show only when it has at least this many times the
+# runner-up's episodes ("the drive is basically this show"); below it, and with
+# no season-overlap signal, the folder stays its own tile.
+_EXTRAS_DOMINANCE_RATIO = 2
+
+
+def _pick_extras_owner(shows, members):
+    """Which of several same-drive shows owns a root extras folder, or None.
+
+    Tier 1 (season overlap): the extras folder's internal season numbers vs
+    each show's present seasons — a strictly-best, non-zero overlap wins (e.g.
+    a "Featurettes/Season 5" beside an S1-7 show and an S1-3 show is decisive).
+    Tier 2 (episode dominance): on a tie or no overlap, the show with at least
+    _EXTRAS_DOMINANCE_RATIO x the runner-up's episodes owns the drive's
+    identity. None = genuinely ambiguous; the caller keeps the tile.
+
+    Only non-``extras`` seasons count on both sides: a grouped show's own
+    member-folder extras (group_seasons) must not skew the season set or counts.
+    """
+    def real(rec):
+        return [s for s in rec.get("seasons") or [] if not s.get("extras")]
+
+    ex_seasons = {s.get("season") for m in members if m.get("type") == "show"
+                  for s in (m.get("seasons") or [])
+                  if s.get("episodes") and s.get("season") is not None
+                  and not s.get("extras")}
+    if ex_seasons:
+        scores = [len(ex_seasons & {s.get("season") for s in real(sh)})
+                  for sh in shows]
+        ranked = sorted(range(len(shows)), key=scores.__getitem__, reverse=True)
+        if scores[ranked[0]] > 0 and scores[ranked[0]] > scores[ranked[1]]:
+            return shows[ranked[0]]
+
+    counts = [sum(len(s.get("episodes") or []) for s in real(sh)) for sh in shows]
+    ranked = sorted(range(len(shows)), key=counts.__getitem__, reverse=True)
+    if (counts[ranked[0]] > 0
+            and counts[ranked[0]] >= _EXTRAS_DOMINANCE_RATIO * counts[ranked[1]]):
+        return shows[ranked[0]]
+    return None
+
+
 def attach_extras(records, extras_records):
     """Fold standalone extras records into the show they sit beside.
 
     Runs AFTER group_seasons, so a drive laid out as bare "Season N" folders
     plus a sibling "Featurettes" folder attaches to the merged drive-show.
-    Target: the single show record sourced from the extras record's drive.
-    With no (or several) candidate shows the extras record keeps its own tile
-    — better a stray tile than featurettes attached to the wrong show.
+    A single show on the drive owns the extras outright; with several shows,
+    _pick_extras_owner disambiguates (season overlap, then episode dominance)
+    and only a genuine tie leaves the extras record as its own tile.
     """
     if not extras_records:
         return records
@@ -713,10 +755,16 @@ def attach_extras(records, extras_records):
         members = groups[(drive_id, label)]
         shows = shows_by_drive.get(drive_id) or []
         movies = movies_by_drive.get(drive_id) or []
-        # Prefer a single show on the drive; else a single loose movie gets the
-        # extras on its own `extras` field. Anything ambiguous stays a tile.
+        # A single show owns the extras; several shows -> disambiguate (or
+        # None); else a lone loose movie gets them on its `extras` field.
+        # Genuinely ambiguous folders stay a tile.
         if len(shows) == 1:
             target = shows[0]
+        elif len(shows) > 1:
+            target = _pick_extras_owner(shows, members)
+        else:
+            target = None
+        if target is not None:
             target["seasons"] = (list(target.get("seasons") or [])
                                  + _extras_entries(members, label))
         elif not shows and len(movies) == 1:
@@ -1360,9 +1408,20 @@ class Scanner:
                     if sections.behavior_for(rec.get("section")) != "entertainment":
                         continue
                     poster = rec.get("poster") or ""
-                    # dthumb_ fallbacks stay upgradeable: retry TMDB until it
-                    # matches, so enabling a key later still fills real posters.
-                    if not poster or poster.startswith("dthumb_"):
+                    # Re-resolve when there's no poster yet, an upgradeable
+                    # dthumb_ fallback, OR a TMDB poster key whose cached image
+                    # file has gone missing (pruned when the title was
+                    # reclassified, or a download that failed after the lookup
+                    # was cached). Without the last case a dangling key shows a
+                    # permanent placeholder — the record has a poster name but
+                    # no file, so neither this test nor the category pass below
+                    # (which skips already-categorised titles) ever refetches
+                    # it. _resolve_poster -> enrich() re-materialises the file.
+                    tmdb_file_gone = (
+                        poster and not poster.startswith("dthumb_")
+                        and not os.path.exists(
+                            os.path.join(config.POSTERS_DIR, poster)))
+                    if not poster or poster.startswith("dthumb_") or tmdb_file_gone:
                         await self._resolve_poster(rec)
                         new_poster = rec.get("poster")
                         if (poster.startswith("dthumb_") and new_poster

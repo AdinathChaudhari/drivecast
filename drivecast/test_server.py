@@ -382,6 +382,10 @@ def test_refresh_rejects_unselected_drive(client):
 
 
 def test_settings_drive_sections_roundtrip_and_scoped_refresh(client):
+    # A drive can only be assigned to a TAB that exists (tabs are user data now,
+    # zero by default) — create one first, then assign drv1 to it.
+    client.post("/api/settings", json={
+        "tabs": [{"key": "podcasts", "label": "Podcasts", "behavior": "podcasts"}]})
     calls = _capture_refresh(client)
     r = client.post("/api/settings", json={"drive_sections": {"drv1": "podcasts", "x": "bogus"}})
     assert r.status_code == 200

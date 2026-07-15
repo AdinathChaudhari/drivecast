@@ -41,6 +41,15 @@ class AppState:
 
     def __init__(self, cfg):
         self.cfg = cfg
+        # sections.py's tabs cache otherwise self-loads from
+        # config.load_config() on first touch (mirroring its plugins() lazy
+        # pattern) -- but this AppState's `cfg` is the actual source of
+        # truth (tests build one from scratch without ever touching disk;
+        # in prod it's the same dict load_config() just returned anyway).
+        # Sync the cache up front so /api/sections and /api/settings always
+        # reflect *this* cfg, never a stale or unrelated on-disk one.
+        from . import sections as sections_mod
+        sections_mod.set_tabs(cfg.get("tabs"))
         self.tokens = TokenManager(cfg["remote"])
         self.api = DriveAPI(self.tokens, self.tokens.list_drives)
         # Hold a power assertion while streams are active (clamshell sleep would
@@ -100,11 +109,23 @@ class AppState:
         self.start_refresh(scope=pending)
 
     def maybe_autorefresh(self):
-        """On startup: rescan if configured to, or if we have drives but no cache."""
+        """On startup: rescan if configured to, or if we have drives but no cache.
+
+        Skipped entirely when every selected drive resolves to no live tab
+        (all assignments point at tabs that have since been deleted, or the
+        drives were never assigned at all): with zero tabs by default, a scan
+        in that state would classify nothing and stamp an empty library.json,
+        which looks identical to genuine data loss rather than "nothing to
+        scan yet" — better to leave the last-known-good cache alone.
+        """
         if self.setup_error:
             return
         drives = self.cfg.get("selected_drives") or []
         if not drives:
+            return
+        from . import sections as sections_mod
+        drive_sections = self.cfg.get("drive_sections") or {}
+        if all(sections_mod.section_for_drive(drive_sections, d) is None for d in drives):
             return
         if self.cfg.get("auto_refresh_on_startup") or self.library.is_empty():
             self.start_refresh()
@@ -426,10 +447,12 @@ def create_app(cfg=None):
 
     @app.get("/api/sections")
     async def api_sections():
-        """Section metadata for the UI: built-ins plus any custom private
-        section plugins (see sections.py)."""
+        """Tab + behavior metadata for the UI (see sections.py for the split):
+        `sections` is the user's actual nav bar (fully resolved, each entry
+        already carries which behavior powers it), `behaviors` is the
+        catalog a "create tab" picker offers ("behaves like...")."""
         from . import sections as sections_mod
-        return {"sections": sections_mod.meta_list()}
+        return {"sections": sections_mod.meta_list(), "behaviors": sections_mod.behaviors_meta()}
 
     @app.get("/api/settings")
     async def api_get_settings():
@@ -439,6 +462,7 @@ def create_app(cfg=None):
         return {
             "selected_drives": state.cfg.get("selected_drives", []),
             "drive_sections": state.cfg.get("drive_sections", {}),
+            "tabs": state.cfg.get("tabs", []),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "subtitles": bool(state.cfg.get("subtitles", True)),
@@ -458,6 +482,66 @@ def create_app(cfg=None):
             if new_drives != (state.cfg.get("selected_drives") or []):
                 drives_changed = True
             state.cfg["selected_drives"] = new_drives
+        # Tabs MUST be processed before drive_sections below: the
+        # drive_sections `valid = sections_mod.all_sections()` check has to
+        # see tabs created in *this same request* (the settings UI creates a
+        # tab and assigns a drive to it in one save), and set_tabs() is what
+        # makes that happen — it swaps sections.py's in-process cache before
+        # all_sections() is next called.
+        if "tabs" in body:
+            from . import sections as sections_mod
+            raw_tabs = body.get("tabs")
+            if not isinstance(raw_tabs, list):
+                raw_tabs = []
+            old_by_key = {t.get("key"): t for t in (state.cfg.get("tabs") or [])
+                          if isinstance(t, dict)}
+            valid_behaviors = sections_mod.behaviors()
+            cleaned = sections_mod.validate_tabs(raw_tabs)
+            # validate_tabs() is lenient by design (existing garbage in
+            # config.json shouldn't crash Settings) — it just silently drops
+            # anything it can't repair. That's fine for an UNCHANGED round-trip
+            # of the current tab list, but an entry the client is actively
+            # CREATING or EDITING must not vanish silently — the user asked to
+            # add/change a tab and would get a 200 with nothing back. Only
+            # free-pass a genuine no-op round-trip (same key AND same
+            # label+behavior as the stored record); anything else (a create, or
+            # an edit — including one that turns an existing tab invalid) falls
+            # through to strict validation below so it 400s instead of dropping.
+            for entry in raw_tabs:
+                if not isinstance(entry, dict):
+                    continue
+                raw_key = str(entry.get("key") or "").strip().lower()
+                label = str(entry.get("label") or "").strip()
+                behavior = entry.get("behavior")
+                old = old_by_key.get(raw_key) if raw_key else None
+                if (old is not None
+                        and str(old.get("label") or "").strip() == label
+                        and old.get("behavior") == behavior):
+                    continue  # unchanged existing tab -- lenient round-trip
+                if not label or len(label) > 40:
+                    return JSONResponse(
+                        {"error": "bad_request",
+                         "message": "Tab label must be 1-40 characters"},
+                        status_code=400)
+                if behavior not in valid_behaviors:
+                    return JSONResponse(
+                        {"error": "bad_request",
+                         "message": "Unknown tab behavior: %r" % (behavior,)},
+                        status_code=400)
+                prospective_key = sections_mod._slugify(raw_key or label, "tab")
+                survived = any(
+                    t["key"] == prospective_key and t["label"] == label
+                    and t["behavior"] == behavior
+                    for t in cleaned
+                )
+                if not survived:
+                    return JSONResponse(
+                        {"error": "bad_request",
+                         "message": "Tab key %r collides with an existing tab"
+                                    % prospective_key},
+                        status_code=400)
+            state.cfg["tabs"] = cleaned
+            sections_mod.set_tabs(cleaned)
         # Section assignments: validate values, refresh just the drives whose
         # section changed (their content must be re-classified).
         section_changed = []
@@ -474,10 +558,16 @@ def create_app(cfg=None):
                             if isinstance(k, str) and v in valid
                             and k in selected_now}
             old_sections = state.cfg.get("drive_sections") or {}
+            # Compare RAW values (no "or entertainment" fallback — that
+            # fallback doesn't make sense once tabs are user-defined and
+            # zero-default). A drive whose assignment appears, changes, or
+            # disappears entirely (e.g. its tab was just deleted, above) is a
+            # change that needs a scoped refresh: a now-unassigned drive's
+            # records must disappear from the library, and a rescan of a
+            # tab-less drive is a no-op, which is exactly what we want.
             section_changed = [
                 d for d in selected_now
-                if (old_sections.get(d) or "entertainment")
-                != (new_sections.get(d) or "entertainment")
+                if old_sections.get(d) != new_sections.get(d)
             ]
             state.cfg["drive_sections"] = new_sections
         if "auto_refresh_on_startup" in body:
@@ -503,6 +593,24 @@ def create_app(cfg=None):
             state.cfg["remote_access"] = new_remote
             if new_remote and not state.cfg.get("remote_token"):
                 state.cfg["remote_token"] = secrets.token_urlsafe(16)
+        # A tab deletion arrives as a tabs-only POST (the Settings delete
+        # button sends just the new tab list, no drive_sections). Reconcile any
+        # drive still pointing at a now-deleted tab: drop the dangling
+        # assignment and fold that drive into section_changed so it is rescanned
+        # and its orphaned records leave the library. When drive_sections IS in
+        # the body it was already filtered against all_sections() above, so this
+        # pass is a harmless no-op in that case.
+        if "tabs" in body:
+            from . import sections as sections_mod
+            valid = set(sections_mod.all_sections())
+            ds = state.cfg.get("drive_sections") or {}
+            orphaned = [d for d, v in ds.items() if v not in valid]
+            if orphaned:
+                state.cfg["drive_sections"] = {d: v for d, v in ds.items()
+                                               if v in valid}
+                for d in orphaned:
+                    if d not in section_changed:
+                        section_changed.append(d)
         config_mod.save_config(state.cfg)
         started = False
         if drives_changed:
@@ -513,6 +621,7 @@ def create_app(cfg=None):
             "ok": True,
             "selected_drives": state.cfg.get("selected_drives", []),
             "drive_sections": state.cfg.get("drive_sections", {}),
+            "tabs": state.cfg.get("tabs", []),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "subtitles": bool(state.cfg.get("subtitles", True)),
@@ -649,7 +758,7 @@ def create_app(cfg=None):
                 item["title_id"] = rec.get("id")
                 item["type"] = rec.get("type")
                 item["poster"] = rec.get("poster")
-                item["section"] = rec.get("section", "entertainment")
+                item["section"] = rec.get("section")
         return {"items": items}
 
     @app.delete("/api/continue/{file_id}")

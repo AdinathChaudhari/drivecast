@@ -9,26 +9,37 @@ while proxying the bytes on demand. Nothing is ever written to disk.
 > 📖 **[Read the case study](CASE-STUDY.md)** — how this was designed, built,
 > hardened and shipped, almost entirely through orchestrated AI agents.
 
-**Sections.** The app is split into four areas, each with its own tab, accent
-colour and vocabulary — assign each drive to one in **Settings** (unassigned
-drives stay in Entertainment; the tab bar only appears once you assign
-something):
+**Tabs & behaviors.** You organise the app into **tabs** you create yourself —
+there are **no tabs by default**. In **Settings**, pick a drive's category from
+the dropdown or choose **＋ New tab…** to make one: give it a **name** and an
+**emoji**, and choose how it **behaves** (which built-in content-type learning
+it reuses). A tab is just data; the *behavior* is the reusable engine:
 
-- 🍿 **Entertainment** — movies & TV shows, with category chips
+- 🍿 **Movies & TV** (`entertainment`) — movies & TV shows, with category chips
   (Movies / TV Shows / Documentaries / Other) derived from TMDB genres.
-- 🎓 **Courses** — course drives become courses with **Modules** and
-  **Lessons**: numbered lesson files are ordered correctly, module folders
+- 🎓 **Course** (`courses`) — a course drive becomes courses with **Modules**
+  and **Lessons**: numbered lesson files are ordered correctly, module folders
   become a module picker, workbook PDFs appear as **Materials**, tiles carry a
   **progress ring**, and **Resume course** continues from your first unwatched
-  lesson (autoplay chains the rest of the course).
-- 🎙 **Podcasts** — each folder on a podcasts drive (e.g. YouTube downloads)
-  becomes a channel tile with its episodes; audio files stream to mpv exactly
-  like video, with resume.
-- **Custom private sections** — drop a plugin `.py` into
-  `~/Library/Application Support/drivecast/sections/` (same private home as
-  your secrets, never part of the repo) to add a fully personal section with
-  its own tab, accent colour, vocabulary and classifier — see the docstring in
-  `drivecast/sections.py` for the tiny plugin contract.
+  lesson. *Any* tab you point at this behavior gets the whole course-structuring
+  learning — so a "Work Courses" tab and a "Personal Courses" tab both work alike.
+- 🎙 **Podcast** (`podcasts`) — each folder on the drive (e.g. YouTube
+  downloads) becomes a channel tile with its episodes; audio streams to mpv
+  exactly like video, with resume.
+
+So you can make a personal **Home Videos 🎥** tab (behaves like *Movies & TV*),
+point a drive at it, and its titles get their own tab with posters and chips —
+no code, no dependence on the built-in names.
+
+**Custom private behaviors.** For a bespoke classifier, drop a plugin `.py` into
+`~/Library/Application Support/drivecast/sections/` (same private home as your
+secrets, never part of the repo); it registers a new **behavior** that your tabs
+can then adopt — see the docstring in `drivecast/sections.py` and
+`TABS_REFACTOR.md` for the model and the tiny plugin contract.
+
+**Upgrading?** Existing setups migrate automatically: whatever you'd assigned
+(Entertainment / Courses / Podcasts / a private plugin) is seeded as matching
+tabs on first launch, so your library looks exactly the same — nothing to redo.
 
 **Library model.** You pick which Shared Drives to include (Settings, or the
 menu-bar app). drivecast scans those drives **once** and caches a structured
@@ -450,13 +461,15 @@ Once `app.py` is running and the library opens in your browser:
    you're watching. To refresh a **single drive** (you know where you just
    uploaded), hover it in Settings for its ⟳ button, or use the menu-bar
    **Refresh one drive** submenu.
-9. **Sections.** Assign drives to **Courses / Podcasts** (or a custom plugin section) with the
-   dropdown next to each included drive in Settings. Saving re-scans just the
-   drives whose section changed. Each section gets its own tab, accent colour
-   and layout (course progress rings, module/lesson naming, audiobook buttons,
-   channel tiles). Entertainment titles get **category chips** — Documentaries
-   are detected from TMDB genres, and titles TMDB doesn't know land under
-   *Other*. Optional per-drive hints live in `config.json` (`drive_hints`):
+9. **Tabs.** Create tabs in Settings (**＋ New tab…** in the per-drive dropdown):
+   name + emoji + a **behavior** (Movies & TV / Course / Podcast, or a private
+   plugin behavior). Then assign drives to your tabs. There are no tabs by
+   default; an included drive you haven't put in a tab yet simply shows nothing
+   until you assign it. Saving re-scans just the drives whose tab changed. Each
+   tab gets its own accent colour and its behavior's layout (course progress
+   rings, module/lesson naming, channel tiles). Tabs that behave like *Movies &
+   TV* get **category chips** — Documentaries are detected from TMDB genres, and
+   titles TMDB doesn't know land under *Other*. Optional per-drive hints live in `config.json` (`drive_hints`):
    `{"<drive_id>": {"category": "documentary"}}` categorises a whole drive's
    TMDB misses, and `{"<drive_id>": {"single_course": true}}` treats a drive
    as ONE course whose root folders are modules.
@@ -540,7 +553,8 @@ only — secrets go in `secrets/` (above).
 | `https_port`   | `8738`    | trusted-LAN HTTPS listener (only started when `remote_access` is on) |
 | `page_size`    | `200`     | Drive files.list page size                          |
 | `selected_drives` | `[]`   | Shared Drive ids included in the library            |
-| `drive_sections` | `{}`    | drive id → `entertainment`\|`courses`\|`podcasts`\|custom |
+| `tabs`         | `[]`      | your tabs: `[{key,label,icon,behavior,accent?,accent2?}]` (seeded from a pre-tabs config on first launch) |
+| `drive_sections` | `{}`    | drive id → a tab `key` from `tabs` (unassigned = shows in no tab) |
 | `drive_hints`  | `{}`      | per-drive classifier hints (`category`, `single_course`) |
 | `auto_refresh_on_startup` | `false` | rescan the library on each launch        |
 | `scan_throttle` | `0.15`   | seconds to pause between scan API calls (quota)     |

@@ -416,21 +416,26 @@ tile) correct no matter which half you refresh. A drive whose scan errors
 keeps its previous titles, and the first refresh after upgrading escalates to
 a full scan to seed the cache.
 
-**Sections.** Each drive is assigned (Settings) to a section —
-Entertainment, Courses, Podcasts, or a **custom private plugin section** — and
-each section gets its own tab, accent colour, classifier and vocabulary.
-Course drives classify into modules/lessons (numbered files ordered properly,
-workbook PDFs as materials, progress rings + a Resume-course button); podcast
-drives become channel tiles. Custom sections are plain `.py` plugins dropped
-into the private user directory (never the repo): they declare a small
-`SECTION` manifest (label, icon, accent, season/episode nouns, mime families)
-plus a pure classifier, and get the full UI — tabs, shelves, audiobooks,
-progress — for free. Audio streams through the exact same Range proxy as
-video — mpv just gets a `--force-window` flag so audio-only playback still
-has a window. Entertainment additionally gets
-**categories** (Movies / TV Shows / Documentaries / Other) from the TMDB
-genres we already fetch for posters — genre 99 is Documentary; a title TMDB
-doesn't know lands in Other. TMDB is never consulted for the other sections
+**Tabs & behaviors.** The nav is split into two concepts. A **behavior** is a
+reusable content-type engine that lives in code: `entertainment` (movie/TV),
+`courses` (modules/lessons), `podcasts` (channel tiles), plus any private `.py`
+plugin dropped into the user directory (never the repo) that declares a small
+`SECTION` manifest — label, icon, accent, season/episode nouns, mime families —
+and a pure classifier. A **tab** is pure user data (`config["tabs"]`: a list of
+`{key,label,icon,behavior,accent?}`) that *picks* a behavior. There are **no
+tabs by default**; you create them in Settings (name + emoji + "behaves like"),
+assign drives to them, and each tab renders with its behavior's classifier,
+accent and vocabulary. So the course-structuring learning is reusable for
+*any* tab that points at the `courses` behavior — not tied to a hardcoded name.
+`section_for_drive()` returns the tab key or `None` (unassigned = shows in no
+tab); nothing falls back to "entertainment" anymore. Existing installs are
+seeded once from their old `drive_sections` (see `migrate_config` in `config.py`
+and `TABS_REFACTOR.md`) so upgrades are invisible. Audio streams through the
+exact same Range proxy as video — mpv just gets a `--force-window` flag so
+audio-only playback still has a window. Tabs whose behavior is `entertainment`
+additionally get **categories** (Movies / TV Shows / Documentaries / Other) from
+the TMDB genres we already fetch for posters — genre 99 is Documentary; a title
+TMDB doesn't know lands in Other. TMDB is never consulted for other behaviors
 (a course named "Intercourse and Communication" would happily match a film).
 
 **Posters, pre-cached.** During the scan, every title that doesn't already have a

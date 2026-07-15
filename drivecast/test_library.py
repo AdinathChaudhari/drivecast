@@ -7,8 +7,36 @@ import os
 
 import pytest
 
-from drivecast import config, library
+from drivecast import config, library, sections
 from drivecast.drive_api import FOLDER_MIME, DriveAPI, DriveAPIError
+
+
+@pytest.fixture(autouse=True)
+def _reset_tabs_cache(monkeypatch):
+    """Isolate the sections.tabs() lazy cache per test (mirrors test_sections.py
+    and conftest's plugin-cache reset) and give every test a live
+    "entertainment" tab for free — most scan tests exercise plain
+    movie/show scanning and shouldn't have to build a tab list just to
+    assign a drive to it. Tests that need courses/podcasts/plugin tabs
+    override with their own monkeypatch.setattr(sections, "_tabs", [...]).
+    """
+    monkeypatch.setattr(sections, "_tabs", [
+        {"key": "entertainment", "label": "Entertainment", "icon": "🍿",
+         "behavior": "entertainment"},
+    ])
+    yield
+
+
+def _ent(*drive_ids):
+    """drive_sections mapping every given drive id to the default "entertainment" tab."""
+    return {d: "entertainment" for d in drive_ids}
+
+
+def _tab(key, behavior, label=None, icon="📁", **extra):
+    """A minimal validated-shape tab record for monkeypatching sections._tabs."""
+    d = {"key": key, "label": label or key.title(), "icon": icon, "behavior": behavior}
+    d.update(extra)
+    return d
 
 
 # ------------------------------------------------------------- helpers --------
@@ -453,7 +481,7 @@ def test_scan_builds_library_without_network(tmp_path):
     }
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path))
-    status = asyncio.run(scanner.scan(["drv1"]))
+    status = asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1")))
     assert status["error"] is None
     assert status["running"] is False
     titles = {t["title"]: t for t in lib.titles_list()}
@@ -479,7 +507,7 @@ def test_scan_survives_folder_rate_limit(tmp_path):
     }
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FlakyAPI(tree), _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path))
-    status = asyncio.run(scanner.scan(["drv1"]))
+    status = asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1")))
     # A folder failure invalidates the whole drive's scan (a PARTIAL result
     # must never become the cached truth) — scan never crashes, error recorded.
     assert status["running"] is False
@@ -491,7 +519,7 @@ def test_scan_survives_folder_rate_limit(tmp_path):
     tree_ok["drv1"] = [rawfolder("goodF", "Arrival (2016)")]
     scanner2 = library.Scanner(_FakeScanAPI(tree_ok), _DisabledTMDB(), lib, throttle=0,
                                cache=_cache(tmp_path))
-    asyncio.run(scanner2.scan(["drv1"]))
+    asyncio.run(scanner2.scan(["drv1"], drive_sections=_ent("drv1")))
     assert [t["title"] for t in lib.titles_list()] == ["Arrival"]
 
 
@@ -533,7 +561,7 @@ def test_scan_falls_back_to_drive_thumbnail(tmp_path, monkeypatch):
     lib = library.Library(path=str(tmp_path / "library.json"))
     api = _ThumbScanAPI(_thumb_tree())
     scanner = library.Scanner(api, _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1"]))
+    asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1")))
     rec = lib.titles_list()[0]
     assert rec["poster"] and rec["poster"].startswith("dthumb_")
     assert os.path.exists(os.path.join(config.POSTERS_DIR, rec["poster"]))
@@ -546,7 +574,7 @@ def test_scan_prefers_tmdb_poster_over_drive_thumbnail(tmp_path, monkeypatch):
     lib = library.Library(path=str(tmp_path / "library.json"))
     api = _ThumbScanAPI(_thumb_tree())
     scanner = library.Scanner(api, _FakeTMDB(), lib, throttle=0, cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1"]))
+    asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1")))
     rec = lib.titles_list()[0]
     assert rec["poster"] == "tmdb.jpg"
     assert api.thumb_fetches == []      # fallback never triggered
@@ -560,7 +588,7 @@ def test_scan_thumbnail_failure_leaves_poster_none(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_NoThumbAPI(_thumb_tree()), _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path))
-    status = asyncio.run(scanner.scan(["drv1"]))
+    status = asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1")))
     assert status["error"] is None
     rec = lib.titles_list()[0]
     assert rec["poster"] is None
@@ -573,13 +601,13 @@ def test_rescan_upgrades_dthumb_to_tmdb_poster(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _DisabledTMDB(),
-                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"], drive_sections=_ent("drv1")))
     rec = lib.titles_list()[0]
     old_file = os.path.join(config.POSTERS_DIR, rec["poster"])
     assert rec["poster"].startswith("dthumb_") and os.path.exists(old_file)
 
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _FakeTMDB(),
-                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"], drive_sections=_ent("drv1")))
     rec = lib.titles_list()[0]
     assert rec["poster"] == "tmdb.jpg"
     assert not os.path.exists(old_file)  # superseded fallback cleaned up
@@ -596,12 +624,12 @@ def test_tmdb_match_without_artwork_keeps_dthumb(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _DisabledTMDB(),
-                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"], drive_sections=_ent("drv1")))
     dthumb = lib.titles_list()[0]["poster"]
     assert dthumb.startswith("dthumb_")
 
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _NoArtTMDB(),
-                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"], drive_sections=_ent("drv1")))
     rec = lib.titles_list()[0]
     assert rec["poster"] == dthumb          # fallback survives
     assert rec["tmdb_id"] == 7              # metadata still enriched
@@ -613,12 +641,12 @@ def test_rescan_restores_missing_dthumb_file(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
     lib = library.Library(path=str(tmp_path / "library.json"))
     asyncio.run(library.Scanner(_ThumbScanAPI(_thumb_tree()), _DisabledTMDB(),
-                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
+                                lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"], drive_sections=_ent("drv1")))
     poster_file = os.path.join(config.POSTERS_DIR, lib.titles_list()[0]["poster"])
     os.remove(poster_file)
 
     api = _ThumbScanAPI(_thumb_tree())
-    asyncio.run(library.Scanner(api, _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"]))
+    asyncio.run(library.Scanner(api, _DisabledTMDB(), lib, throttle=0, cache=_cache(tmp_path)).scan(["drv1"], drive_sections=_ent("drv1")))
     assert api.thumb_fetches                 # re-downloaded
     assert os.path.exists(poster_file)
 
@@ -948,14 +976,14 @@ def test_partial_refresh_equals_full_refresh(tmp_path):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    asyncio.run(scanner.scan(["drv1", "drv2"], drive_sections=_ent("drv1", "drv2")))
     full = {t["id"]: t for t in lib.titles_list()}
     assert set(full) == {"mv1", "mv2"}
 
     # Add a movie to drv2, then refresh ONLY drv2.
     tree["drv2"].append(rawfolder("m3F", "Dune (2021)"))
     tree["m3F"] = [rawfile("mv3", "Dune.2021.2160p.mkv", size=10)]
-    asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"]))
+    asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"], drive_sections=_ent("drv1", "drv2")))
     titles = {t["id"]: t for t in lib.titles_list()}
     # drv1's title survives untouched; drv2's addition landed.
     assert set(titles) == {"mv1", "mv2", "mv3"}
@@ -982,7 +1010,7 @@ def test_partial_refresh_preserves_bare_season_drives(tmp_path):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_NamedAPI(tree), _DisabledTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["dM1", "dM2"]))
+    asyncio.run(scanner.scan(["dM1", "dM2"], drive_sections=_ent("dM1", "dM2")))
     recs = lib.titles_list()
     assert len(recs) == 2
     by_drive = {r["drive_id"]: r for r in recs}
@@ -991,7 +1019,7 @@ def test_partial_refresh_preserves_bare_season_drives(tmp_path):
     ids = {d: r["id"] for d, r in by_drive.items()}
 
     # Refresh only Part 2: both shows survive with unchanged ids.
-    asyncio.run(scanner.scan(["dM1", "dM2"], scope=["dM2"]))
+    asyncio.run(scanner.scan(["dM1", "dM2"], scope=["dM2"], drive_sections=_ent("dM1", "dM2")))
     recs2 = lib.titles_list()
     assert len(recs2) == 2
     assert {r["drive_id"]: r["id"] for r in recs2} == ids
@@ -1013,12 +1041,12 @@ def test_scan_failure_keeps_previous_titles(tmp_path):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(api, _DisabledTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    asyncio.run(scanner.scan(["drv1", "drv2"], drive_sections=_ent("drv1", "drv2")))
     assert {t["id"] for t in lib.titles_list()} == {"mv1", "mv2"}
 
     # drv1's root now errors: a rescan must NOT drop drv1's titles.
     api.fail_drive = "drv1"
-    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    asyncio.run(scanner.scan(["drv1", "drv2"], drive_sections=_ent("drv1", "drv2")))
     assert {t["id"] for t in lib.titles_list()} == {"mv1", "mv2"}
     assert scanner.status["error"] is not None
 
@@ -1030,7 +1058,7 @@ def test_partial_scope_escalates_when_sibling_cache_missing(tmp_path):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"]))
+    asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"], drive_sections=_ent("drv1", "drv2")))
     assert scanner.status["total"] == 2                    # escalated to full
     assert set(scanner.status["scope"]) == {"drv1", "drv2"}
     assert {t["id"] for t in lib.titles_list()} == {"mv1", "mv2"}
@@ -1042,11 +1070,11 @@ def test_deselected_drive_pruned_from_cache_and_library(tmp_path):
     cache = _cache(tmp_path)
     scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
                               cache=cache)
-    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    asyncio.run(scanner.scan(["drv1", "drv2"], drive_sections=_ent("drv1", "drv2")))
     assert set(cache.drive_ids()) == {"drv1", "drv2"}
 
     # Deselect drv2: its titles and cache entry disappear.
-    asyncio.run(scanner.scan(["drv1"]))
+    asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1")))
     assert {t["id"] for t in lib.titles_list()} == {"mv1"}
     assert cache.drive_ids() == ["drv1"]
 
@@ -1056,9 +1084,9 @@ def test_added_at_stable_across_partial_refresh(tmp_path):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1", "drv2"]))
+    asyncio.run(scanner.scan(["drv1", "drv2"], drive_sections=_ent("drv1", "drv2")))
     first = lib.get("mv1")["added_at"]
-    asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"]))
+    asyncio.run(scanner.scan(["drv1", "drv2"], scope=["drv2"], drive_sections=_ent("drv1", "drv2")))
     assert lib.get("mv1")["added_at"] == first
 
 
@@ -1132,7 +1160,7 @@ def test_scanner_stamps_categories(tmp_path, monkeypatch):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _GenreTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1"]))
+    asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1")))
     cats = {t["title"]: t["category"] for t in lib.titles_list()}
     assert cats["India The Modi Question"] == "documentary"
     assert cats["Arrival"] == "movie"
@@ -1146,7 +1174,7 @@ def test_scanner_category_hint_overrides_no_match(tmp_path, monkeypatch):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _GenreTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1"],
+    asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1"),
                              drive_hints={"drv1": {"category": "documentary"}}))
     assert only(lib.titles_list())["category"] == "documentary"
 
@@ -1158,12 +1186,12 @@ def test_category_carried_across_rescans(tmp_path, monkeypatch):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _GenreTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1"]))
+    asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1")))
     assert only(lib.titles_list())["category"] == "movie"
     # Rescan with TMDB disabled: the category is carried, not wiped.
     scanner2 = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
                                cache=_cache(tmp_path))
-    asyncio.run(scanner2.scan(["drv1"]))
+    asyncio.run(scanner2.scan(["drv1"], drive_sections=_ent("drv1")))
     assert only(lib.titles_list())["category"] == "movie"
 
 
@@ -1173,7 +1201,7 @@ def test_category_null_when_tmdb_disabled(tmp_path):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["drv1"]))
+    asyncio.run(scanner.scan(["drv1"], drive_sections=_ent("drv1")))
     assert only(lib.titles_list())["category"] is None
 
 
@@ -1209,7 +1237,7 @@ def test_bare_season_show_survives_drive_rename(tmp_path, monkeypatch):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(api, _MissTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["dSH"]))
+    asyncio.run(scanner.scan(["dSH"], drive_sections=_ent("dSH")))
     rec = only(lib.titles_list())
     assert rec["title"] == "Frasier"
     assert rec["category"] == "show"     # structural show, no TMDB fallback
@@ -1217,7 +1245,7 @@ def test_bare_season_show_survives_drive_rename(tmp_path, monkeypatch):
 
     # Rename the drive and rescan: same id, new title, still "show".
     api.drive_name = "Frasier Reboot"
-    asyncio.run(scanner.scan(["dSH"]))
+    asyncio.run(scanner.scan(["dSH"], drive_sections=_ent("dSH")))
     rec2 = only(lib.titles_list())
     assert rec2["id"] == first_id
     assert rec2["title"] == "Frasier Reboot"
@@ -1237,13 +1265,13 @@ def test_stuck_other_show_self_heals_on_rescan(tmp_path, monkeypatch):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(api, _MissTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["dSH"]))
+    asyncio.run(scanner.scan(["dSH"], drive_sections=_ent("dSH")))
     rec = only(lib.titles_list())
     # Simulate the poisoned state persisted by the old bug.
     lib.get(rec["id"])["category"] = "other"
     assert lib.get(rec["id"])["category"] == "other"
 
-    asyncio.run(scanner.scan(["dSH"]))
+    asyncio.run(scanner.scan(["dSH"], drive_sections=_ent("dSH")))
     healed = only(lib.titles_list())
     assert healed["id"] == rec["id"]     # same title -> id stable, no rename
     assert healed["category"] == "show"
@@ -1262,18 +1290,19 @@ def test_stuck_other_show_respects_drive_hint_over_self_heal(tmp_path, monkeypat
     scanner = library.Scanner(api, _MissTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
     hints = {"dSH": {"category": "other"}}
-    asyncio.run(scanner.scan(["dSH"], drive_hints=hints))
+    asyncio.run(scanner.scan(["dSH"], drive_sections=_ent("dSH"), drive_hints=hints))
     rec = only(lib.titles_list())
     lib.get(rec["id"])["category"] = "other"
 
-    asyncio.run(scanner.scan(["dSH"], drive_hints=hints))
+    asyncio.run(scanner.scan(["dSH"], drive_sections=_ent("dSH"), drive_hints=hints))
     assert only(lib.titles_list())["category"] == "other"
 
 
 # ------------------------------------------------------- sections (M3) --------
 
-def test_migrate_library_v1_stamps_fields(tmp_path):
+def test_migrate_library_v1_stamps_fields(tmp_path, monkeypatch):
     import json as _json
+    monkeypatch.setattr(sections, "_tabs", [_tab("courses", "courses")])
     v1 = {"version": 1, "generated_at": 1.0, "titles": {
         "movieA": {"id": "movieA", "type": "movie", "title": "Arrival",
                    "drive_id": "drv1", "file_id": "fA", "size": 1},
@@ -1293,6 +1322,7 @@ def test_migrate_library_v1_stamps_fields(tmp_path):
 
 def test_scan_stamps_section_and_skips_tmdb_for_non_entertainment(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    monkeypatch.setattr(sections, "_tabs", [_tab("courses", "courses")])
     tree = {"drv1": [rawfolder("cF", "Intercourse and Communication")],
             "cF": [rawfile("c1", "1 - Tactical Empathy.mp4"),
                    rawfile("c2", "2 - Mirroring.mp4")]}
@@ -1317,9 +1347,12 @@ def test_scan_stamps_section_and_skips_tmdb_for_non_entertainment(tmp_path, monk
     assert all(not r.get("poster") for r in recs)   # no film posters attached
 
 
-def test_course_named_part1_never_merges_as_season(tmp_path):
+def test_course_named_part1_never_merges_as_season(tmp_path, monkeypatch):
     # An entertainment drive has "X Season 1"-style folders; a COURSES drive
     # has a "(Part 1)" folder — grouping must only appl to entertainment.
+    monkeypatch.setattr(sections, "_tabs", [
+        _tab("entertainment", "entertainment"), _tab("courses", "courses"),
+    ])
     tree = {
         "ent": [rawfolder("s1", "Blackadder Season 1 S01")],
         "s1": [rawfile("e1", "ep1.mkv"), rawfile("e2", "ep2.mkv")],
@@ -1329,7 +1362,8 @@ def test_course_named_part1_never_merges_as_season(tmp_path):
     lib = library.Library(path=str(tmp_path / "library.json"))
     scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
                               cache=_cache(tmp_path))
-    asyncio.run(scanner.scan(["ent", "crs"], drive_sections={"crs": "courses"}))
+    asyncio.run(scanner.scan(["ent", "crs"],
+                             drive_sections={"ent": "entertainment", "crs": "courses"}))
     secs = {t["title"]: t["section"] for t in lib.titles_list()}
     assert any(s == "courses" for s in secs.values())
     course = next(t for t in lib.titles_list() if t["section"] == "courses")
@@ -1364,6 +1398,12 @@ def test_scan_dispatches_course_and_plugin_classifiers(tmp_path, monkeypatch):
         "myaudio": {"key": "myaudio", "label": "My Audio", "icon": "♪",
                     "mimes": ("video", "audio"), "classify": _plugin_classify},
     })
+    # Tabs are data now: a tab must exist for each drive's TAB assignment,
+    # even when the tab key happens to equal its behavior key (allowed —
+    # tabs no longer have to dodge behavior names).
+    monkeypatch.setattr(sections_mod, "_tabs", [
+        _tab("courses", "courses"), _tab("myaudio", "myaudio"),
+    ])
 
     tree = {
         # courses drive: one flat course with two numbered lessons + workbook
@@ -1407,8 +1447,10 @@ def test_scan_dispatches_course_and_plugin_classifiers(tmp_path, monkeypatch):
 
 
 def test_plugin_loading_from_dir(tmp_path, monkeypatch):
-    # A SECTION plugin dropped into the plugin dir loads; junk files are
-    # ignored and a broken plugin never crashes the app.
+    # A SECTION plugin dropped into the plugin dir loads a BEHAVIOR; junk
+    # files are ignored and a broken plugin never crashes the app. A behavior
+    # only shows up in all_sections()/mimes_for/meta_list once some TAB is
+    # actually built on it — behaviors never render by themselves.
     from drivecast import sections as sections_mod
     plug_dir = tmp_path / "sections"
     plug_dir.mkdir()
@@ -1421,10 +1463,183 @@ def test_plugin_loading_from_dir(tmp_path, monkeypatch):
     (plug_dir / "notaplugin.py").write_text("x = 1\n")
     monkeypatch.setattr(sections_mod, "PLUGIN_DIR", str(plug_dir))
     monkeypatch.setattr(sections_mod, "_plugins", None)   # reset the cache
+    monkeypatch.setattr(sections_mod, "_tabs", [
+        _tab("entertainment", "entertainment"),
+        _tab("courses", "courses"),
+        _tab("podcasts", "podcasts"),
+        _tab("custom", "custom"),
+    ])
     assert "custom" in sections_mod.all_sections()
     assert sections_mod.mimes_for("custom") == ("video",)
+    # classify_for is keyed by BEHAVIOR now, not tab — "custom" the tab key
+    # and "custom" the behavior key happen to be equal here, which is legal.
     assert callable(sections_mod.classify_for("custom"))
     assert sections_mod.classify_for("entertainment") is None
     metas = {m["key"] for m in sections_mod.meta_list()}
     assert metas == {"entertainment", "courses", "podcasts", "custom"}
     monkeypatch.setattr(sections_mod, "_plugins", None)   # don't leak to other tests
+
+
+# --------------------------------------------------- behaviors vs. tabs (S2) --
+#
+# Dispatch/gating now keys off a tab's BEHAVIOR (sections.behavior_for), never
+# off the tab's own key string — a user-renamed "My Courses" tab built on the
+# "courses" behavior must classify/stamp exactly like a tab literally named
+# "courses" always did. These tests use tab keys that deliberately do NOT
+# match their behavior's name to prove that.
+
+def test_custom_courses_tab_dispatches_course_classifier_and_stamps_tab_key(tmp_path, monkeypatch):
+    # Clone of test_scan_stamps_section_and_skips_tmdb_for_non_entertainment,
+    # but the tab's KEY is "my-courses" while its BEHAVIOR is "courses" —
+    # dispatch must still hit classify_course_drive, and every record must be
+    # stamped with the TAB key, not the behavior key.
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    monkeypatch.setattr(sections, "_tabs",
+                        [_tab("my-courses", "courses", label="My Courses")])
+    tree = {"drv1": [rawfolder("cF", "Art_of_Negotiation")],
+            "cF": [rawfile("l1", "1 - Tactical Empathy.mp4"),
+                   rawfile("l2", "2 - Mirroring.mp4"),
+                   rawfile("wb", "Class Workbook.pdf", mime="application/pdf")]}
+
+    calls = []
+
+    class _SpyTMDB:
+        enabled = True
+
+        async def enrich(self, title, year=None, media_type="movie"):
+            calls.append(title)
+            return {"tmdb_id": 1, "title": title, "year": year,
+                    "poster_key": "wrong.jpg", "overview": None, "genre_ids": []}
+
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _SpyTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1"], drive_sections={"drv1": "my-courses"}))
+    recs = lib.titles_list()
+    course = only(recs)
+    assert course["section"] == "my-courses"          # TAB key, not "courses"
+    assert course["type"] == "show"
+    assert course["materials"][0]["name"] == "Class Workbook.pdf"  # course classifier ran
+    assert calls == []                                # TMDB never consulted for courses
+    assert not course.get("poster")
+
+
+def test_custom_entertainment_tab_gets_tmdb_and_is_stamped_with_tab_key(tmp_path, monkeypatch):
+    # A tab named "flix" built on the "entertainment" behavior still gets the
+    # TMDB poster + category passes (gated on behavior, not on the literal
+    # string "entertainment"), and its records are stamped "flix".
+    monkeypatch.setattr(config, "POSTERS_DIR", str(tmp_path / "posters"))
+    monkeypatch.setattr(sections, "_tabs", [_tab("flix", "entertainment", label="Flix")])
+    tree = {"drv1": [rawfolder("movF", "Arrival (2016)")],
+            "movF": [rawfile("m1", "Arrival.2016.1080p.mkv")]}
+
+    class _SpyTMDB:
+        enabled = True
+
+        async def enrich(self, title, year=None, media_type="movie"):
+            return {"tmdb_id": 1, "title": title, "year": year,
+                    "poster_key": "tmdb.jpg", "overview": "o", "genre_ids": []}
+
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    scanner = library.Scanner(_FakeScanAPI(tree), _SpyTMDB(), lib, throttle=0,
+                              cache=_cache(tmp_path))
+    asyncio.run(scanner.scan(["drv1"], drive_sections={"drv1": "flix"}))
+    rec = only(lib.titles_list())
+    assert rec["section"] == "flix"
+    assert rec["poster"] == "tmdb.jpg"      # TMDB poster pass ran
+    assert rec["category"] == "movie"       # TMDB category pass ran
+
+
+def test_per_tab_grouping_merges_within_tab_not_across_tabs(tmp_path):
+    # Same show split across two drives via "<Show> Season N" sibling
+    # folders. Season-merging is bucketed PER TAB now (not per behavior): the
+    # split must merge into one grp: record when both drives share a tab, but
+    # must NEVER merge when the two drives sit in two different
+    # entertainment-behavior tabs.
+    tree = {
+        "d1": [rawfolder("s1", "Big Show Season 1")],
+        "s1": [rawfile("e1", "ep1.mkv"), rawfile("e2", "ep2.mkv")],
+        "d2": [rawfolder("s2", "Big Show Season 2")],
+        "s2": [rawfile("e3", "ep1.mkv")],
+    }
+    cache = _cache(tmp_path)
+
+    # Same tab ("taba" both) -> merges into one grp: record stamped "taba".
+    # (Tab keys are lowercased by validate_tabs, so lowercase-only here.)
+    sections.set_tabs([_tab("taba", "entertainment"), _tab("tabb", "entertainment")])
+    lib_same = library.Library(path=str(tmp_path / "lib_same.json"))
+    scanner_same = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib_same,
+                                   throttle=0, cache=cache)
+    asyncio.run(scanner_same.scan(["d1", "d2"],
+                                  drive_sections={"d1": "taba", "d2": "taba"}))
+    recs_same = lib_same.titles_list()
+    assert len(recs_same) == 1
+    assert recs_same[0]["id"].startswith("grp:")
+    assert recs_same[0]["section"] == "taba"
+    assert sorted(s["season"] for s in recs_same[0]["seasons"]) == [1, 2]
+
+    # Different tabs ("taba"/"tabb") -> never merges, stays two records, each
+    # stamped with its own tab.
+    lib_diff = library.Library(path=str(tmp_path / "lib_diff.json"))
+    scanner_diff = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib_diff,
+                                   throttle=0, cache=cache)
+    asyncio.run(scanner_diff.scan(["d1", "d2"],
+                                  drive_sections={"d1": "taba", "d2": "tabb"}))
+    recs_diff = lib_diff.titles_list()
+    # Each tab's lone "Season N" folder still groups on its own (that's
+    # group_seasons' normal single-drive behavior) -- the point is the two
+    # tabs' groupings never fold INTO EACH OTHER: two distinct records, two
+    # distinct ids, one season each, never the combined [1, 2].
+    assert len(recs_diff) == 2
+    assert {r["section"] for r in recs_diff} == {"taba", "tabb"}
+    assert len({r["id"] for r in recs_diff}) == 2        # distinct ids, no collision
+    for r in recs_diff:
+        assert [s["season"] for s in r["seasons"]] != [1, 2]   # never merged
+
+
+def test_unassigned_drive_skipped_keeps_cache_contributes_no_records(tmp_path):
+    # A drive included in `selected` but with no live tab assignment
+    # (section_for_drive -> None) is skipped: it counts as "scanned", but
+    # contributes zero records to the rebuild, and its PRIOR scan-cache entry
+    # is left untouched (a later reassignment is a cheap re-walk, not a full
+    # rescan from empty).
+    tree = {
+        "drv1": [rawfolder("movF", "Arrival (2016)")],
+        "movF": [rawfile("m1", "Arrival.2016.1080p.mkv")],
+        "drv2": [rawfolder("s2F", "Sicario (2015)")],
+        "s2F": [rawfile("m2", "Sicario.2015.1080p.mkv")],
+    }
+    lib = library.Library(path=str(tmp_path / "library.json"))
+    cache = _cache(tmp_path)
+    scanner = library.Scanner(_FakeScanAPI(tree), _DisabledTMDB(), lib, throttle=0,
+                              cache=cache)
+
+    # First scan: both drives assigned to "entertainment" -> both land.
+    asyncio.run(scanner.scan(["drv1", "drv2"], drive_sections=_ent("drv1", "drv2")))
+    assert {r["id"] for r in lib.titles_list()} == {"m1", "m2"}
+    assert set(cache.drive_ids()) == {"drv1", "drv2"}
+    cached_drv2_before = cache.get("drv2")
+
+    # drv2's tab assignment is removed (unassigned): rescan both, but only
+    # map drv1 -> entertainment now.
+    status = asyncio.run(scanner.scan(["drv1", "drv2"], drive_sections=_ent("drv1")))
+    assert {r["id"] for r in lib.titles_list()} == {"m1"}    # drv2 contributed nothing
+    assert cache.get("drv2") == cached_drv2_before           # cache untouched, not cleared
+    assert status["warning"] and "drv2" in status["warning"]
+    assert status["scanned"] == 2                            # drv2 still counted as visited
+
+
+def test_migrate_library_v1_stamps_custom_tab_key(tmp_path, monkeypatch):
+    # A record whose drive is assigned a user-created custom tab key (not one
+    # of the three historical builtin strings) stamps that custom key.
+    import json as _json
+    monkeypatch.setattr(sections, "_tabs", [_tab("my-flix", "entertainment")])
+    v1 = {"version": 1, "generated_at": 1.0, "titles": {
+        "movieA": {"id": "movieA", "type": "movie", "title": "Arrival",
+                   "drive_id": "drv1", "file_id": "fA", "size": 1},
+    }}
+    p = tmp_path / "library.json"
+    p.write_text(_json.dumps(v1))
+    lib = library.Library(path=str(p), drive_sections={"drv1": "my-flix"})
+    rec = lib.get("movieA")
+    assert rec["section"] == "my-flix"

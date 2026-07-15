@@ -40,6 +40,13 @@ def migrate_library_v1(data, drive_sections=None):
     Stamps the fields v2 records carry so the app is fully functional before
     the first rescan: section (from the drive assignment), category (None =
     provisional until a TMDB pass), media, source_drives.
+
+    `section_for_drive` now returns None for a drive with no live tab (e.g. a
+    since-deselected drive, or one whose tab was deleted) — config migration
+    always runs before this (see config.load_config/migrate_config), so by
+    the time this executes, a still-selected drive already resolves to
+    whatever tab it was seeded/assigned into. A None here is harmless: the
+    record is simply invisible until the next scan prunes or reassigns it.
     """
     for rec in (data.get("titles") or {}).values():
         rec.setdefault("section",
@@ -770,12 +777,12 @@ def merge_existing_metadata(old_titles, new_titles):
         old = old_titles.get(tid)
         if not old:
             continue
-        # A record reclassified into a different section keeps NOTHING: its
-        # old TMDB poster/overview (matched as a film) would be wrong for a
+        # A record reclassified into a different TAB keeps NOTHING: its old
+        # TMDB poster/overview (matched as a film) would be wrong for a
         # course/series, and a stale poster would block the cover-image
-        # fallback forever.
-        if ((old.get("section") or "entertainment")
-                != (rec.get("section") or "entertainment")):
+        # fallback forever. Compare the raw tab keys directly — there is no
+        # more "entertainment" fallback to paper over a missing/None section.
+        if old.get("section") != rec.get("section"):
             continue
         # Same id, different title = a rename (drive-is-the-show groups keep
         # their id across a drive rename). The old poster/tmdb/overview/category
@@ -1020,6 +1027,9 @@ class Scanner:
         self.status = {
             "running": False, "scanned": 0, "total": 0,
             "added": 0, "removed": 0, "error": None, "scope": [],
+            # Non-fatal: drives that were scanned-over but skipped because
+            # they aren't assigned to any live tab (see scan()'s loop).
+            "warning": None,
         }
 
     async def _throttle(self):
@@ -1072,11 +1082,13 @@ class Scanner:
                 node["files"].append(_file_dict(c, node["id"]))
         return node
 
-    async def _scan_drive(self, drive_id, section="entertainment", hints=None,
-                          drive_name=""):
+    async def _scan_drive(self, drive_id, section, hints=None, drive_name=""):
         """Return the list of title records for one drive, or None if the
         drive's root couldn't be listed (caller keeps the previous cache
-        entry so a flaky drive doesn't empty its titles). Never raises."""
+        entry so a flaky drive doesn't empty its titles). Never raises.
+
+        `section` is a TAB key and must never be None here — scan() already
+        filtered out drives with no live tab assignment before calling in."""
         kinds = sections.mimes_for(section)
         try:
             root = await self._list_folder(drive_id, drive_id, kinds)
@@ -1108,22 +1120,33 @@ class Scanner:
                               hints or {})
 
     def _classify(self, section, drive_id, drive_name, nodes, loose, hints):
-        """Dispatch walked nodes + loose root files to the section's classifier."""
-        if section == "courses":
+        """Dispatch walked nodes + loose root files to the TAB's BEHAVIOR classifier.
+
+        `section` is a TAB key; the actual dispatch happens on the BEHAVIOR
+        that tab is built on (multiple tabs can share one behavior, e.g. two
+        "courses" tabs fed by different drives — both must dispatch to the
+        course classifier). Falls back to treating `section` itself as the
+        behavior key if the tab can't be resolved (defensive; scan() already
+        guards against a None section reaching here).
+        """
+        base = sections.behavior_for(section) or section
+        if base == "courses":
             from .courses import classify_course_drive
             return classify_course_drive(drive_id, drive_name, nodes, loose, hints)
-        if section == "podcasts":
+        if base == "podcasts":
             from .playlists import classify_playlist_drive
             return classify_playlist_drive(drive_id, drive_name, nodes, loose)
-        plugin_classify = sections.classify_for(section)
+        plugin_classify = sections.classify_for(base)
         if plugin_classify is not None:
             # Custom private section (see sections.py): plugin classifiers
             # receive the same node shape as the built-ins.
             try:
                 return plugin_classify(drive_id, drive_name, nodes, loose)
             except Exception:  # pragma: no cover - a plugin must not kill scans
-                log.exception("Custom section %r classifier failed", section)
+                log.exception("Custom section %r (behavior %r) classifier failed",
+                             section, base)
                 return []
+        # Entertainment (or an unresolvable base): the plain movie/show walk.
         records = []
         for node in nodes:
             records.extend(classify_node(node))
@@ -1207,15 +1230,28 @@ class Scanner:
         if any(not self.cache.has(d) for d in selected if d not in scope):
             scope = list(selected)
         self.status.update(running=True, scanned=0, total=len(scope),
-                           added=0, removed=0, error=None, scope=list(scope))
+                           added=0, removed=0, error=None, warning=None,
+                           scope=list(scope))
         try:
             try:
                 drive_names = {d["id"]: d.get("name", "") for d in await self.api.list_drives()}
             except Exception:
                 drive_names = {}
 
+            unassigned = []
             for drive_id in scope:
                 section = sections.section_for_drive(drive_sections, drive_id)
+                if section is None:
+                    # No live tab claims this drive (never assigned, or its
+                    # tab was since deleted). Don't touch the cache: the old
+                    # scan-cache entry for this drive stays put so simply
+                    # reassigning it to a tab later is a cheap re-walk, not a
+                    # full rescan. Count it "scanned" (it WAS visited) but
+                    # skip classification entirely.
+                    log.warning("Drive %s has no tab assignment; skipping scan", drive_id)
+                    unassigned.append(drive_id)
+                    self.status["scanned"] += 1
+                    continue
                 records = await self._scan_drive(
                     drive_id, section, drive_hints.get(drive_id) or {},
                     drive_names.get(drive_id, ""))
@@ -1228,27 +1264,79 @@ class Scanner:
                     rec.setdefault("media", "video")
                 self.cache.put(drive_id, records)
             self.cache.prune(selected)
+            if unassigned:
+                self.status["warning"] = (
+                    "%d drive(s) need a tab assignment in Settings: %s"
+                    % (len(unassigned), ", ".join(sorted(unassigned))))
 
-            # Rebuild from cached raw records of ALL selected drives (deep
-            # copies — group_seasons mutates its input).
+            # Rebuild from cached raw records of every selected drive that's
+            # STILL assigned to a live tab (deep copies — group_seasons
+            # mutates its input). A drive whose tab was deleted since its
+            # last successful scan must not resurrect its cached records
+            # under a now-dead section key.
             all_records = []
             for drive_id in selected:
+                if sections.section_for_drive(drive_sections, drive_id) is None:
+                    continue
                 all_records.extend(self.cache.get(drive_id))
 
-            # Season-merging is an ENTERTAINMENT concept: a course or podcast
-            # named "... Part 1" must never merge as someone's season.
-            ent = [r for r in all_records
-                   if r.get("section", "entertainment") == "entertainment"]
-            rest = [r for r in all_records
-                    if r.get("section", "entertainment") != "entertainment"]
-            # Standalone extras folders (a drive-root "Featurettes" beside the
-            # show's season folders) fold into their show after grouping.
-            ent, ent_extras = split_extras_records(ent)
-            grouped = attach_extras(group_seasons(ent, drive_names), ent_extras)
+            # Season-merging is an ENTERTAINMENT-BEHAVIOR concept: a course or
+            # podcast named "... Part 1" must never merge as someone's season.
+            # There is no single entertainment pool anymore — tabs are data,
+            # and two different entertainment-behavior tabs must never merge
+            # into each other's records — so records are bucketed PER TAB and
+            # grouped independently; a grp:/extras record is stamped with its
+            # own bucket's tab key, never a neighboring tab's.
+            ent_buckets = {}   # tab key -> records, for entertainment-behavior tabs
+            rest = []
+            for r in all_records:
+                sec = r.get("section")
+                if sections.behavior_for(sec) == "entertainment":
+                    ent_buckets.setdefault(sec, []).append(r)
+                else:
+                    rest.append(r)
+
+            # group_seasons() derives a "grp:" id from the show's normalised
+            # NAME alone (see its docstring) — fine when there was one global
+            # entertainment pool, but two DIFFERENT entertainment-behavior
+            # tabs that each happen to have a "<Show> Season N" pattern for
+            # the same show name would otherwise mint the IDENTICAL id and
+            # silently clobber each other in new_titles below. Only
+            # disambiguate when more than one entertainment-behavior tab is
+            # actually in play, so the overwhelmingly common single-tab install
+            # keeps its "grp:" ids byte-for-byte stable.
+            #
+            # NB: decide this from the CONFIGURED tab list, not from how many
+            # buckets happened to produce records in THIS scan. Keying off the
+            # transient ent_buckets would flip the flag the moment an unrelated
+            # second entertainment tab starts/stops contributing, silently
+            # rehashing the grp: ids of *unchanged* tabs — which then miss in
+            # merge_existing_metadata() by id and lose their category/poster/
+            # added_at. The configured count only changes when the user
+            # deliberately adds/removes an entertainment tab (a one-time
+            # transition), so unchanged tabs keep stable ids across scans.
+            multi_ent_tabs = sum(
+                1 for t in sections.tabs()
+                if sections.behavior_for(t.get("key")) == "entertainment"
+            ) > 1
+            grouped = []
+            for tab_key, bucket in ent_buckets.items():
+                # Standalone extras folders (a drive-root "Featurettes" beside
+                # the show's season folders) fold into their show after
+                # grouping, per bucket so cross-tab folding can't happen.
+                bucket, bucket_extras = split_extras_records(bucket)
+                bucket_grouped = attach_extras(
+                    group_seasons(bucket, drive_names), bucket_extras)
+                for rec in bucket_grouped:
+                    rec["section"] = tab_key
+                    if multi_ent_tabs and rec.get("id", "").startswith("grp:"):
+                        rec["id"] = "grp:" + hashlib.sha1(
+                            ("%s|%s" % (tab_key, rec["id"])).encode("utf-8")
+                        ).hexdigest()[:16]
+                grouped.extend(bucket_grouped)
             grouped = grouped + _strip_transient(rest)
             new_titles = {rec["id"]: rec for rec in grouped}
             for rec in new_titles.values():
-                rec.setdefault("section", "entertainment")
                 rec.setdefault("media", "video")
                 rec.setdefault("category", None)
 
@@ -1264,10 +1352,12 @@ class Scanner:
             # configured; titles that already have a poster are skipped.
             if self.tmdb.enabled:
                 for rec in new_titles.values():
-                    # TMDB is for entertainment only: a course like
+                    # TMDB is for entertainment BEHAVIOR only: a course like
                     # "Intercourse and Communication" would happily match a
-                    # film. Other sections poster via Drive thumbnails.
-                    if rec.get("section", "entertainment") != "entertainment":
+                    # film. Other tabs poster via Drive thumbnails. Gated on
+                    # the tab's BEHAVIOR, not its key, so a user-renamed
+                    # entertainment tab still gets posters.
+                    if sections.behavior_for(rec.get("section")) != "entertainment":
                         continue
                     poster = rec.get("poster") or ""
                     # dthumb_ fallbacks stay upgradeable: retry TMDB until it
@@ -1286,7 +1376,7 @@ class Scanner:
                 # titles that already have a poster (they skip the pass above).
                 # enrich() answers from its cache, so this is cheap.
                 for rec in new_titles.values():
-                    if rec.get("section", "entertainment") != "entertainment":
+                    if sections.behavior_for(rec.get("section")) != "entertainment":
                         continue
                     if rec.get("category") is not None:
                         continue
@@ -1304,7 +1394,7 @@ class Scanner:
             # drive explicitly overrides its category. Runs with TMDB off too so
             # already-poisoned libraries recover; needs no TMDB call.
             for rec in new_titles.values():
-                if rec.get("section", "entertainment") != "entertainment":
+                if sections.behavior_for(rec.get("section")) != "entertainment":
                     continue
                 if rec.get("type") == "show" and rec.get("category") == "other":
                     hint = ((drive_hints or {}).get(rec.get("drive_id")) or {}).get("category")

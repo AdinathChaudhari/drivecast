@@ -458,7 +458,7 @@ def create_app(cfg=None):
     async def api_get_settings():
         state = app.state.dc
         from .player import detect_player
-        available = [k for k in ("mpv", "iina", "vlc") if detect_player(k)[0]]
+        available = [k for k in ("mpv", "iina", "vlc", "infuse") if detect_player(k)[0]]
         return {
             "selected_drives": state.cfg.get("selected_drives", []),
             "drive_sections": state.cfg.get("drive_sections", {}),
@@ -580,7 +580,7 @@ def create_app(cfg=None):
             state.cfg["keep_awake"] = bool(body.get("keep_awake"))
         if "player" in body:
             choice = str(body.get("player") or "auto")
-            if choice in ("auto", "mpv", "iina", "vlc"):
+            if choice in ("auto", "mpv", "iina", "vlc", "infuse"):
                 state.cfg["player"] = choice
         # Remote access: a change to the bind mode only takes effect on the next
         # launch, so flag restart_required when it flips. Enabling it mints a

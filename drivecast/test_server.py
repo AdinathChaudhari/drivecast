@@ -197,6 +197,21 @@ def test_settings_post_player(client):
     assert client.get("/api/settings").json()["player"] == "vlc"
 
 
+def test_settings_post_player_infuse(client):
+    r = client.post("/api/settings", json={"player": "infuse"})
+    assert r.status_code == 200
+    assert client.get("/api/settings").json()["player"] == "infuse"
+
+
+def test_available_players_includes_infuse(client, monkeypatch):
+    import drivecast.player as player_mod
+    monkeypatch.setattr(
+        player_mod, "detect_player",
+        lambda pref="auto": (pref, "/x") if pref in ("mpv", "iina", "vlc", "infuse") else (None, None),
+    )
+    assert "infuse" in client.get("/api/settings").json()["available_players"]
+
+
 def test_settings_post_toggle_auto_refresh(client):
     r = client.post("/api/settings", json={"auto_refresh_on_startup": True})
     assert r.status_code == 200

@@ -1064,7 +1064,7 @@ async function openSettings() {
     }
     const hint = $("playerHint");
     if (hint && avail.length) hint.textContent =
-      "Installed: " + avail.join(", ") + ". mpv and IINA track your position for Continue Watching; VLC now does too via its HTTP interface. mpv stays the recommended default.";
+      "Installed: " + avail.join(", ") + ". mpv, IINA and VLC track your position for Continue Watching; Infuse is launch-only (no tracking or autoplay). mpv stays the recommended default.";
   }
   list.innerHTML = "";
   if (!drives.length) {

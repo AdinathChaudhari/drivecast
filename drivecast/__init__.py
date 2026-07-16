@@ -1,7 +1,7 @@
 """drivecast — stream video straight from Google Shared Drives (no downloads)."""
 import os
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def _ensure_cli_path():

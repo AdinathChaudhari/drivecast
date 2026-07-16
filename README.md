@@ -3,7 +3,7 @@
 Stream video (and audio) straight from your Google **Shared Drives** — no
 downloads, no syncing. drivecast is a tiny local web app that presents your
 Shared Drives as a **cached media library** — movie and TV-show tiles with
-pre-fetched posters, seasons and episodes — and plays files in mpv / IINA / VLC
+pre-fetched posters, seasons and episodes — and plays files in mpv / IINA / VLC / Infuse
 while proxying the bytes on demand. Nothing is ever written to disk.
 
 > 📖 **[Read the case study](CASE-STUDY.md)** — how this was designed, built,
@@ -149,9 +149,13 @@ default (it needs no extra interface); if VLC's HTTP interface can't start
 
 **Choosing a player.** By default drivecast auto-picks mpv → IINA → VLC. To force
 one, use **Settings → Video player** in the app (it shows which players are
-installed), or set `"player"` in `config.json` to `auto` / `mpv` / `iina` / `vlc`.
+installed), or set `"player"` in `config.json` to `auto` / `mpv` / `iina` / `vlc` / `infuse`.
 Playback works the same in any of them (each streams the local URL by requesting
-byte-ranges); all three now report your position back for resume.
+byte-ranges); all three now report your position back for resume. **Infuse**
+(Mac App Store) is supported as a launch-only target: drivecast opens the
+stream via Infuse's URL scheme, so playback works great but there is no resume
+tracking, Continue Watching, or autoplay-next for it (Infuse keeps its own
+internal resume). Auto never picks Infuse — select it explicitly.
 
 ### 4. (Optional) TMDB posters
 
@@ -365,9 +369,9 @@ existing instance in your browser and exits (it won't start a second server).
 
 rclone must be set up on the machine (see **Setup** above) — the app reads the
 Drive token from your rclone config exactly like `app.py` does. A player
-(mpv / IINA / VLC) is needed to actually play video; all three support resume
-tracking (VLC via its HTTP interface), with mpv the recommended default
-(`brew install mpv`).
+(mpv / IINA / VLC, plus Infuse launch-only) is needed to actually play video;
+mpv / IINA / VLC support resume tracking (VLC via its HTTP interface), with mpv
+the recommended default (`brew install mpv`).
 
 ### Build the bundle
 

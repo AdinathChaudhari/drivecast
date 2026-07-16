@@ -1,14 +1,17 @@
 """External player launch + resume tracking.
 
 Player preference: mpv (on PATH) -> IINA (iina-cli) -> VLC (direct binary).
-We never use `open -a`; we invoke the binary directly so we can pass flags and
-know when it exits.
+For mpv/IINA/VLC we never use `open`; we invoke the binary directly so we can
+pass flags and know when it exits.
 
 mpv / IINA expose a JSON IPC socket we poll for playback-time so we can save
 resume positions. VLC is tracked over its HTTP interface: we launch it with a
 loopback HTTP server on a private port + random password, then poll
 /requests/status.xml for the current time/length and save exactly like mpv. If
 the interface never comes up (older VLC, busy port) we degrade to launch-only.
+Infuse (macOS app) is launch-only: we open its infuse:// URL scheme via `open`
+— it has no IPC/HTTP interface, so there is no resume tracking, watched-
+marking, or autoplay for it.
 """
 import base64
 import json
@@ -19,6 +22,7 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
@@ -27,6 +31,7 @@ log = logging.getLogger("drivecast.player")
 
 IINA_CLI = "/Applications/IINA.app/Contents/MacOS/iina-cli"
 VLC_BIN = "/Applications/VLC.app/Contents/MacOS/VLC"
+INFUSE_APP = "/Applications/Infuse.app"
 
 SOCKET_WAIT_SECONDS = 10.0
 POLL_INTERVAL = 3.0
@@ -140,6 +145,25 @@ def build_vlc_args(path, resume, name, url, http_port, http_password, sub_path=N
     return args
 
 
+def build_infuse_url(url, resume=0, name=None, sub_url=None):
+    """Construct the infuse:// x-callback URL for launch-only playback.
+
+    Infuse has no IPC/HTTP interface, so this is the whole integration:
+    `open` hands the URL to Infuse.app. `position` resumes (seconds),
+    `filename` gives Infuse a real name for metadata (our /stream URLs are
+    opaque file ids), `sub` is an HTTP URL to a subtitle file. Pure function
+    so the encoding is unit-testable.
+    """
+    parts = ["infuse://x-callback-url/play?url=%s" % urllib.parse.quote(url, safe="")]
+    if resume and int(resume) > 0:
+        parts.append("position=%d" % int(resume))
+    if name:
+        parts.append("filename=%s" % urllib.parse.quote(name, safe=""))
+    if sub_url:
+        parts.append("sub=%s" % urllib.parse.quote(sub_url, safe=""))
+    return "&".join(parts)
+
+
 def parse_vlc_status(xml_text):
     """Parse VLC's /requests/status.xml into (time, length) floats.
 
@@ -175,8 +199,12 @@ def _find_free_port(start=VLC_HTTP_PORT_START, tries=50):
 
 
 def detect_player(preference="auto"):
-    """Return (kind, path) where kind in {"mpv","iina","vlc"} or (None, None)."""
-    if preference in ("mpv", "iina", "vlc"):
+    """Return (kind, path); kind in {"mpv","iina","vlc","infuse"} or (None, None).
+
+    "auto" tries mpv -> IINA -> VLC only: Infuse is launch-only (no position
+    tracking), so it must be chosen explicitly, never auto-picked.
+    """
+    if preference in ("mpv", "iina", "vlc", "infuse"):
         order = [preference]
     else:
         order = ["mpv", "iina", "vlc"]
@@ -191,6 +219,9 @@ def detect_player(preference="auto"):
         elif kind == "vlc":
             if os.path.exists(VLC_BIN):
                 return "vlc", VLC_BIN
+        elif kind == "infuse":
+            if os.path.exists(INFUSE_APP):
+                return "infuse", INFUSE_APP
     return None, None
 
 
@@ -260,9 +291,12 @@ class PlayerManager:
         elif kind == "iina":
             self._launch_iina(path, file_id, name, url, resume, duration, drive_id,
                               parent_id, queue, sub_path=sub_path)
-        else:  # vlc
+        elif kind == "vlc":
             self._launch_vlc(path, file_id, name, url, resume, duration, drive_id,
                              parent_id, queue, sub_path=sub_path)
+        else:  # infuse
+            self._launch_infuse(file_id, name, url, resume, duration,
+                                drive_id, parent_id, sub_path=sub_path)
         return resume
 
     def _launch_mpv(self, path, file_id, name, url, resume, duration, drive_id,
@@ -297,6 +331,28 @@ class PlayerManager:
             return
         self._start_vlc_poller(path, proc, http_port, http_password, file_id, name,
                                duration, drive_id, parent_id, queue)
+
+    def _launch_infuse(self, file_id, name, url, resume, duration, drive_id,
+                       parent_id, sub_path=None):
+        """Open the stream in Infuse via its URL scheme. LAUNCH-ONLY.
+
+        Infuse exposes no IPC/HTTP interface, so we can't poll position: no
+        Continue Watching updates, no watched-on-finish, no autoplay-next.
+        We seed a history entry so the item still shows up with its metadata,
+        then hand off to `open` and forget about it.
+        """
+        sub_url = None
+        if sub_path:
+            # Infuse can't read our sandboxed local cache path; hand it the
+            # server's own subtitle endpoint instead.
+            sub_url = "%s/api/subtitles/%s" % (self.base_url, file_id)
+        infuse_url = build_infuse_url(url, resume=resume, name=name, sub_url=sub_url)
+        self.history.update(file_id, name=name, drive_id=drive_id,
+                            parent_id=parent_id, duration=duration, force=True)
+        try:
+            subprocess.Popen(["open", infuse_url])
+        except OSError as exc:
+            log.debug("Infuse launch failed: %r", exc)
 
     # ---- IPC poller (mpv / IINA) ----
 

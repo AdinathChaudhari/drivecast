@@ -3,37 +3,34 @@
 
 const $ = (id) => document.getElementById(id);
 
-// The app is split into sections, each with its own tab, accent colour and
-// vocabulary. A drive is assigned to a section in Settings; unassigned =
-// entertainment (records carry `section`). These built-ins are only the
-// fallback — the real list (including any custom private section plugins) is
-// loaded from /api/sections at init.
-let SECTION_META = {
-  entertainment: { label: "Entertainment", icon: "🍿", continue: "Continue Watching",
-    lib: "Your Library",
-    empty: "No entertainment titles yet — assign drives in Settings and refresh." },
-  courses: { label: "Courses", icon: "🎓", accent: "#4ade80", accent2: "#86efac",
-    continue: "Continue Learning", lib: "Your Courses",
-    empty: "No course drive yet — assign one to Courses in Settings and it appears here.",
-    season: "Module", episode: "Lesson" },
-  podcasts: { label: "Podcasts", icon: "🎙", accent: "#c084fc", accent2: "#e0b3ff",
-    continue: "Continue Watching", lib: "Your Podcasts",
-    empty: "No podcast drive yet — assign one in Settings when you've added it." },
-};
-let SECTION_ORDER = Object.keys(SECTION_META);
+// The app is split into tabs, each with its own nav entry, accent colour and
+// vocabulary. A tab is user-defined data (config["tabs"] — see
+// TABS_REFACTOR.md): its "behavior" (entertainment/courses/podcasts/a private
+// plugin) supplies the classifier, mimes and vocab, but the tab itself —
+// label, icon, accent — only exists once someone builds it in Settings.
+// There are ZERO tabs by default, so there is no built-in fallback to fall
+// back to: SECTION_META/SECTION_ORDER start empty and are only ever filled by
+// /api/sections. A drive assigned to a tab that's since been deleted (or
+// never assigned at all) belongs to no tab — rec.section can be null.
+let SECTION_META = {};
+let SECTION_ORDER = [];
+// [{key,label}, ...] straight from /api/sections — feeds the create-tab
+// "behaves like" picker (built-in behaviors + any loaded plugin behaviors).
+let BEHAVIORS = [];
 
 async function loadSections() {
   try {
     const data = await api("/api/sections");
     const list = data.sections || [];
-    if (!list.length) return;
     SECTION_META = {};
     SECTION_ORDER = [];
     for (const m of list) {
       SECTION_META[m.key] = m;
       SECTION_ORDER.push(m.key);
     }
-  } catch (_) { /* fall back to the built-ins */ }
+    BEHAVIORS = data.behaviors || [];
+  } catch (_) { /* fetch failed — keep whatever we last knew rather than
+                   inventing phantom builtins that don't exist server-side */ }
 }
 
 // On a phone/tablet the page is served over the LAN/tailnet (not loopback), so
@@ -45,7 +42,7 @@ const REMOTE_LOCAL_HOSTS = ["127.0.0.1", "localhost", "::1", "[::1]"];
 const state = {
   library: [],          // cached title records from /api/library
   byId: {},             // id -> record
-  section: "entertainment", // active section tab
+  section: null,        // active tab key; null = no live tab (zero-tab onboarding)
   remote: !REMOTE_LOCAL_HOSTS.includes(location.hostname),
   remoteToken: "",      // secret token for external-player stream URLs
   remoteInfo: null,     // cached /api/remote payload (urls, port, token)
@@ -68,21 +65,25 @@ const state = {
   browseView: "drives", // drives | browse | search
 };
 
-function sectionOf(rec) { return rec.section || "entertainment"; }
+function sectionOf(rec) { return rec.section || null; }
 
-// Sections become visible the moment any drive is assigned away from
-// entertainment; until then the app looks exactly like it always did.
+// Tabs are the only source of what shows up in the nav bar — visible as soon
+// as at least one exists, regardless of whether any drive is assigned to it
+// yet (a brand new tab still deserves its own empty-state screen).
 function sectionsActive() {
-  return Object.values(state.driveSections || {}).some((s) => s && s !== "entertainment");
+  return SECTION_ORDER.length > 0;
 }
 
 function setSection(sec) {
-  if (!SECTION_META[sec]) sec = "entertainment";
+  // Coerce an unknown/stale/missing key to the first live tab, or to no tab
+  // at all on a zero-tab install — there's no "entertainment" to fall back
+  // to anymore.
+  if (!sec || !SECTION_META[sec]) sec = SECTION_ORDER[0] || null;
   state.section = sec;
-  document.body.dataset.section = sec;
-  // Section accents come from the metadata (so custom plugin sections theme
-  // themselves); entertainment clears back to the stylesheet default.
-  const m = SECTION_META[sec] || {};
+  document.body.dataset.section = sec || "";
+  // Tab accents come from the metadata (so custom/plugin tabs theme
+  // themselves); no active tab clears back to the stylesheet default.
+  const m = (sec && SECTION_META[sec]) || {};
   if (m.accent) {
     document.body.style.setProperty("--accent", m.accent);
     document.body.style.setProperty("--accent-2", m.accent2 || m.accent);
@@ -90,7 +91,10 @@ function setSection(sec) {
     document.body.style.removeProperty("--accent");
     document.body.style.removeProperty("--accent-2");
   }
-  try { localStorage.setItem("dc.section", sec); } catch (_) {}
+  try {
+    if (sec) localStorage.setItem("dc.section", sec);
+    else localStorage.removeItem("dc.section");
+  } catch (_) {}
 }
 
 function renderTabs() {
@@ -101,7 +105,7 @@ function renderTabs() {
     const m = SECTION_META[sec];
     const a = document.createElement("a");
     a.className = "section-tab" + (sec === state.section ? " active" : "");
-    a.innerHTML = `<span class="tab-icon">${m.icon}</span> ${m.label}`;
+    a.innerHTML = `<span class="tab-icon">${escapeHTML(m.icon)}</span> ${escapeHTML(m.label)}`;
     a.addEventListener("click", () => { location.hash = "#/s/" + sec; });
     nav.appendChild(a);
   }
@@ -233,28 +237,31 @@ function titleCard(rec) {
   card.className = "card video";
   const p = posterMarkup(rec);
   const sec = sectionOf(rec);
+  // Branch on the tab's BEHAVIOR, not its (arbitrary, user-chosen) key: a
+  // custom tab keyed "my-courses" with behavior "courses" must render like one.
+  const behavior = (SECTION_META[sec] || {}).behavior;
   const isShow = rec.type === "show";
   let badge = "", pill = "", sub = "";
   // Movie-shaped records (loose files on a sections drive, or v1-migrated
   // records pre-rescan) fall through to the plain movie subtitle.
-  if (sec === "courses" && isShow) {
+  if (behavior === "courses" && isShow) {
     const prog = courseProgress(rec);
     pill = progressRing(prog);
     if (prog >= 1) badge = `<span class="badge done">✓ Done</span>`;
     const mods = (rec.seasons || []).length;
     sub = mods > 1 ? `${mods} modules · ${countEpisodes(rec)} lessons`
                    : `${countEpisodes(rec)} lessons`;
-  } else if (sec === "podcasts" && isShow) {
+  } else if (behavior === "podcasts" && isShow) {
     pill = mediaPill(rec);
     sub = `${countEpisodes(rec)} episode${countEpisodes(rec) === 1 ? "" : "s"}`;
-  } else if (sec !== "entertainment" && isShow) {
-    // Custom plugin sections: media pill + counts in the section's own nouns.
+  } else if (behavior !== "entertainment" && isShow) {
+    // Custom plugin behaviors: media pill + counts in the section's own nouns.
     pill = mediaPill(rec);
     const n = nomen(rec);
     const cnt = (rec.seasons || []).length;
     sub = `${cnt} ${n.season.toLowerCase()}${cnt === 1 ? "" : "s"} · ` +
           `${countEpisodes(rec)} ${n.episode.toLowerCase()}${countEpisodes(rec) === 1 ? "" : "s"}`;
-  } else if (sec !== "entertainment") {
+  } else if (behavior !== "entertainment") {
     pill = mediaPill(rec) || qualityPill(rec);
     sub = rec.year || "";
   } else {
@@ -329,7 +336,7 @@ function categoryOf(rec) {
 
 function matchesFilter(rec) {
   if (sectionOf(rec) !== state.section) return false;
-  if (state.section === "entertainment" &&
+  if ((SECTION_META[state.section] || {}).behavior === "entertainment" &&
       state.filter !== "all" && categoryOf(rec) !== state.filter) return false;
   if (state.query) {
     const q = state.query.toLowerCase();
@@ -385,7 +392,7 @@ function driveLabel(id) { return state.driveName[id] || id || "Unknown drive"; }
 function groupItems(items) {
   // Non-entertainment sections group into shelves by default ("Python",
   // "Audio Series", "Talks", ...) — the classifier sets rec.shelf.
-  if (state.section !== "entertainment" && state.group === "none") {
+  if ((SECTION_META[state.section] || {}).behavior !== "entertainment" && state.group === "none") {
     const map = {};
     for (const r of items) (map[r.shelf || ""] = map[r.shelf || ""] || []).push(r);
     const keys = Object.keys(map).sort((a, b) => a.localeCompare(b));
@@ -411,19 +418,40 @@ function groupItems(items) {
 }
 
 function renderLibrary() {
-  // If sections were deactivated (all drives back on entertainment) while a
-  // non-entertainment section was active/persisted, the hidden tab bar would
-  // leave the library unreachable — snap back to entertainment.
-  if (!sectionsActive() && state.section !== "entertainment") setSection("entertainment");
+  // If the active tab no longer exists (deleted mid-session, or a stale
+  // localStorage value from before this install had any tabs) snap to
+  // another live tab, or to no tab at all — the hidden tab bar would
+  // otherwise leave the library unreachable.
+  if (state.section && !SECTION_META[state.section]) setSection(SECTION_ORDER[0] || null);
   renderTabs();
-  $("continueHead").textContent = SECTION_META[state.section].continue;
-  $("libHead").textContent = SECTION_META[state.section].lib;
+
+  // Zero-tab onboarding: nothing to show until a tab exists to show it in.
+  if (!SECTION_ORDER.length) {
+    show($("filters"), false);
+    show($("libSection"), false);
+    showCta(`<h2>Create your first tab</h2>
+      <p>Tabs decide how your library is organized — Movies &amp; TV, Courses,
+        Podcasts, or a custom behavior. Create one, then assign drives to it
+        in Settings.</p>
+      <button class="btn primary" id="ctaCreateTab">Create your first tab</button>`);
+    const btn = $("ctaCreateTab");
+    if (btn) btn.addEventListener("click", () => {
+      openCreateFormOnSettingsLoad = true;
+      location.hash = "#/settings";
+    });
+    return;
+  }
+
+  const meta = SECTION_META[state.section] || {};
+  const isEntertainment = meta.behavior === "entertainment";
+  $("continueHead").textContent = meta.continue || "Continue Watching";
+  $("libHead").textContent = meta.lib || "Your Library";
   const grid = $("libGrid");
   grid.innerHTML = "";
   grid.className = "grid";
   const inSection = state.library.filter((r) => sectionOf(r) === state.section);
-  show($("filters"), state.section === "entertainment");
-  if (state.section === "entertainment") {
+  show($("filters"), isEntertainment);
+  if (isEntertainment) {
     updateFilterChips(inSection.filter((r) => !state.query ||
       (r.title || "").toLowerCase().includes(state.query.toLowerCase())));
   }
@@ -446,9 +474,8 @@ function renderLibrary() {
   }
   if (!inSection.length) {
     show($("libSection"), false);
-    showCta(`<h2>${SECTION_META[state.section].icon || ""} Nothing here yet</h2>
-      <p>${escapeHTML(SECTION_META[state.section].empty ||
-        "Assign a drive to this section in Settings.")}</p>
+    showCta(`<h2>${meta.icon || ""} Nothing here yet</h2>
+      <p>${escapeHTML(meta.empty || "Assign a drive to this tab in Settings.")}</p>
       <a class="btn primary" href="#/settings">Open Settings</a>`);
     return;
   }
@@ -507,10 +534,13 @@ function showCta(html) {
 async function loadContinue() {
   try {
     const data = await api("/api/continue");
-    // Scope the shelf to the active section (items from unknown/browse-played
-    // files count as entertainment).
+    // Scope the shelf to the active section. A continue item whose file no
+    // longer resolves to a library title (its drive's tab was deleted, or the
+    // drive was deselected) carries no section — it belongs to no tab, exactly
+    // like an orphaned library record (see sectionOf), so it must NOT fall back
+    // to entertainment and resurface there.
     const items = (data.items || []).filter(
-      (it) => (it.section || "entertainment") === state.section);
+      (it) => (it.section || null) === state.section);
     const sec = $("continueSection");
     const row = $("continueRow");
     row.innerHTML = "";
@@ -598,7 +628,8 @@ function detailHeader(rec) {
     const prog = courseProgress(rec);
     if (prog > 0) subBits.push(`${Math.round(prog * 100)}% complete`);
   }
-  const pill = sec === "entertainment" ? qualityPill(rec) : mediaPill(rec);
+  const pill = (SECTION_META[state.section] || {}).behavior === "entertainment"
+    ? qualityPill(rec) : mediaPill(rec);
   return `
     <div class="detail-hero">
       <div class="detail-poster poster${p.cls}">${pill}${p.html}</div>
@@ -612,7 +643,7 @@ function detailHeader(rec) {
 }
 
 function renderMovieDetail(rec) {
-  $("detailBody").innerHTML = detailHeader(rec);
+  $("detailBody").innerHTML = detailHeader(rec) + `<div id="movieExtras"></div>`;
   const actions = $("detailActions");
   const play = document.createElement("button");
   play.className = "btn primary";
@@ -621,6 +652,47 @@ function renderMovieDetail(rec) {
     { id: rec.file_id, name: rec.title, drive_id: rec.drive_id, parent_id: rec.folder_id },
     rec.duration_ms || null, false, [], rec.media || null));
   actions.appendChild(play);
+  renderMovieExtras(rec);
+}
+
+// Movie featurettes/extras: labelled groups of bonus clips shown below the
+// Play button. Each clip plays as a SINGLE item (no autoplay queue), so a
+// featurette never chains into another clip or the feature.
+function renderMovieExtras(rec) {
+  const box = $("movieExtras");
+  if (!box) return;
+  box.innerHTML = "";
+  const groups = (rec.extras || []).filter((g) => (g.episodes || []).length);
+  if (!groups.length) return;
+  groups.forEach((g) => {
+    const head = document.createElement("h3");
+    head.className = "materials-head";
+    head.textContent = g.name || "Extras";
+    box.appendChild(head);
+    const list = document.createElement("div");
+    list.className = "episodes";
+    (g.episodes || []).forEach((ep) => {
+      if (!ep.file_id) return;
+      const row = document.createElement("div");
+      row.className = "episode";
+      const prog = state.progress[ep.file_id] || {};
+      if (prog.watched) row.classList.add("watched");
+      const mark = prog.watched ? `<span class="ep-done">✓</span>`
+        : (ep.media === "audio" ? `<span class="ep-audio">♪</span>` : "");
+      const pct = !prog.watched && prog.percent > 2
+        ? `<div class="progress"><span style="width:${Math.min(98, prog.percent)}%"></span></div>` : "";
+      row.innerHTML = `
+        <span class="ep-num"></span>
+        <span class="ep-title">${escapeHTML(ep.title || ep.name)}</span>
+        <span class="ep-dur">${ep.duration_ms ? fmtTime(ep.duration_ms / 1000) : ""}</span>
+        <span class="ep-play">${mark || "▶"}</span>${pct}`;
+      row.addEventListener("click", () => playFile(
+        { id: ep.file_id, name: ep.name, drive_id: rec.drive_id, parent_id: ep.parent_id },
+        ep.duration_ms || null, false, [], ep.media || null));
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+  });
 }
 
 function renderShowDetail(rec) {
@@ -745,7 +817,6 @@ function renderEpisodes(rec, season) {
   const list = $("episodeList");
   list.innerHTML = "";
   if (!season) return;
-  const sec = sectionOf(rec);
 
   // A volume/season ripped as a single audiobook file gets a one-tap play.
   if (season.audiobook && season.audiobook.file_id) {
@@ -766,8 +837,8 @@ function renderEpisodes(rec, season) {
     const prog = state.progress[ep.file_id] || {};
     if (prog.watched) row.classList.add("watched");
     const num = ep.episode != null
-      ? (sec === "entertainment" ? `E${String(ep.episode).padStart(2, "0")}`
-                                 : String(ep.episode))
+      ? ((SECTION_META[state.section] || {}).behavior === "entertainment"
+          ? `E${String(ep.episode).padStart(2, "0")}` : String(ep.episode))
       : "";
     const mark = prog.watched ? `<span class="ep-done">✓</span>`
       : (ep.media === "audio" ? `<span class="ep-audio">♪</span>` : "");
@@ -790,15 +861,185 @@ function renderEpisodes(rec, season) {
 }
 
 // ---------- settings view ----------
+
+// ---- tabs: create / delete ----
+// Set by the zero-tab onboarding CTA (renderLibrary) before it routes to
+// Settings, so openSettings pops the create-tab form open as soon as the
+// drive list has rendered — the CTA's button can't open the form directly
+// because it lives inside the Settings view, which hasn't been built yet.
+let openCreateFormOnSettingsLoad = false;
+function maybeOpenCreateFormNow() {
+  if (!openCreateFormOnSettingsLoad) return;
+  openCreateFormOnSettingsLoad = false;
+  openCreateTabForm();
+}
+
+// The <select class="drive-section"> that triggered "＋ New tab…", so the
+// newly created tab can be pre-selected there once it exists; null when the
+// form was opened from the zero-tab CTA or the "Your tabs" list instead.
+let createTabTriggerSelect = null;
+
+// Build/rebuild one drive's tab <select>: a disabled placeholder (no
+// "entertainment" default to fall back on), every live tab, then "＋ New
+// tab…". `currentValue` is kept if it's still a live tab, else the
+// placeholder — this is also how a deleted tab's former assignees fall back
+// to "unchosen" without any special-casing at delete time.
+function populateDriveSectionSelect(sel, currentValue) {
+  sel.innerHTML = "";
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "— choose a tab —";
+  placeholder.disabled = true;
+  sel.appendChild(placeholder);
+  for (const key of SECTION_ORDER) {
+    const m = SECTION_META[key] || {};
+    const opt = document.createElement("option");
+    opt.value = key;
+    opt.textContent = `${m.icon || ""} ${m.label || key}`.trim();
+    sel.appendChild(opt);
+  }
+  const newOpt = document.createElement("option");
+  newOpt.value = "__new__";
+  newOpt.textContent = "＋ New tab…";
+  sel.appendChild(newOpt);
+  sel.value = SECTION_META[currentValue] ? currentValue : "";
+  sel.dataset.prev = sel.value;
+}
+
+// The raw config["tabs"] shape (see TABS_REFACTOR.md) reconstructed from the
+// currently-loaded SECTION_META/SECTION_ORDER — meta_list() already carries
+// each tab's own "key", so round-tripping this never re-slugifies a label
+// into a different key. Used as the base list for both create (append) and
+// delete (filter out).
+function currentTabsPayload() {
+  return SECTION_ORDER.map((key) => {
+    const m = SECTION_META[key] || {};
+    const t = { key: m.key || key, label: m.label, icon: m.icon, behavior: m.behavior };
+    if (m.accent) t.accent = m.accent;
+    if (m.accent2) t.accent2 = m.accent2;
+    return t;
+  });
+}
+
+function populateBehaviorSelect() {
+  const sel = $("newSectionBehavior");
+  if (!sel) return;
+  sel.innerHTML = "";
+  for (const b of BEHAVIORS) {
+    const opt = document.createElement("option");
+    opt.value = b.key;
+    opt.textContent = b.label;
+    sel.appendChild(opt);
+  }
+}
+
+function openCreateTabForm() {
+  const form = $("newSectionForm");
+  if (!form) return;
+  $("newSectionName").value = "";
+  $("newSectionIcon").value = "";
+  $("newSectionMsg").textContent = "";
+  populateBehaviorSelect();
+  show(form, true);
+  $("newSectionName").focus();
+}
+
+function closeCreateTabForm() {
+  const form = $("newSectionForm");
+  if (form) show(form, false);
+  createTabTriggerSelect = null;
+}
+
+async function submitCreateTab() {
+  const name = ($("newSectionName").value || "").trim();
+  const icon = ($("newSectionIcon").value || "").trim();
+  const behavior = $("newSectionBehavior").value;
+  const msg = $("newSectionMsg");
+  if (!name) { msg.textContent = "Name is required."; return; }
+  if (!behavior) { msg.textContent = "Choose what this tab behaves like."; return; }
+  msg.textContent = "Creating…";
+  const entry = { label: name, behavior };
+  if (icon) entry.icon = icon;   // empty -> server picks the default icon
+  const priorKeys = new Set(SECTION_ORDER);
+  const triggerSel = createTabTriggerSelect;
+  try {
+    await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tabs: currentTabsPayload().concat([entry]) }),
+    });
+    await loadSections();
+    const newKey = SECTION_ORDER.find((k) => !priorKeys.has(k));
+    document.querySelectorAll("select.drive-section").forEach((sel) => {
+      populateDriveSectionSelect(sel, sel === triggerSel ? newKey : sel.value);
+    });
+    closeCreateTabForm();
+    renderTabs();
+    renderTabsManageList();
+    toast(`Created “${(SECTION_META[newKey] || {}).label || name}”.`, "success");
+  } catch (e) {
+    msg.textContent = e.message || "Could not create tab.";
+  }
+}
+
+function renderTabsManageList() {
+  const box = $("tabsManageList");
+  if (!box) return;
+  box.innerHTML = "";
+  if (!SECTION_ORDER.length) {
+    box.innerHTML = `<p class="muted">No tabs yet — create one below.</p>`;
+    return;
+  }
+  for (const key of SECTION_ORDER) {
+    const m = SECTION_META[key] || {};
+    const row = document.createElement("div");
+    row.className = "tab-manage-row";
+    row.innerHTML = `<span class="tab-manage-icon">${escapeHTML(m.icon || "")}</span>
+      <span class="tab-manage-label">${escapeHTML(m.label || key)}</span>
+      <button class="tab-manage-del" title="Delete this tab" aria-label="Delete this tab">✕</button>`;
+    row.querySelector(".tab-manage-del").addEventListener("click", () => deleteTab(key));
+    box.appendChild(row);
+  }
+}
+
+async function deleteTab(key) {
+  const m = SECTION_META[key] || {};
+  const affected = Object.values(state.driveSections || {}).filter((v) => v === key).length;
+  const warn = affected
+    ? ` ${affected} drive${affected === 1 ? "" : "s"} assigned to it will need a new tab chosen in Settings.`
+    : "";
+  if (!confirm(`Delete “${m.label || key}”?${warn}`)) return;
+  try {
+    await api("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tabs: currentTabsPayload().filter((t) => t.key !== key) }),
+    });
+    await loadSections();
+    renderTabs();
+    renderTabsManageList();
+    document.querySelectorAll("select.drive-section")
+      .forEach((sel) => populateDriveSectionSelect(sel, sel.value));
+  } catch (e) {
+    toast("Could not delete tab: " + e.message, "error");
+  }
+}
+
 async function openSettings() {
   showView("settings");
   $("settingsMsg").textContent = "";
+  closeCreateTabForm();
+  renderTabsManageList();
   const list = $("driveList");
   list.innerHTML = `<div class="spinner">Loading drives…</div>`;
   let drives = [], settings = {};
   try { settings = await api("/api/settings"); } catch (_) {}
   try { drives = (await api("/api/drives")).drives || []; }
-  catch (e) { list.innerHTML = `<div class="empty">Could not list drives: ${escapeHTML(e.message)}</div>`; return; }
+  catch (e) {
+    list.innerHTML = `<div class="empty">Could not list drives: ${escapeHTML(e.message)}</div>`;
+    maybeOpenCreateFormNow();
+    return;
+  }
   const selected = new Set(settings.selected_drives || []);
   const assigned = settings.drive_sections || {};
   state.driveSections = assigned;
@@ -823,27 +1064,35 @@ async function openSettings() {
     }
     const hint = $("playerHint");
     if (hint && avail.length) hint.textContent =
-      "Installed: " + avail.join(", ") + ". mpv and IINA track your position for Continue Watching; VLC now does too via its HTTP interface. mpv stays the recommended default.";
+      "Installed: " + avail.join(", ") + ". mpv, IINA and VLC track your position for Continue Watching; Infuse is launch-only (no tracking or autoplay). mpv stays the recommended default.";
   }
   list.innerHTML = "";
-  if (!drives.length) { list.innerHTML = `<div class="empty">No Shared Drives found.</div>`; return; }
+  if (!drives.length) {
+    list.innerHTML = `<div class="empty">No Shared Drives found.</div>`;
+    maybeOpenCreateFormNow();
+    return;
+  }
   for (const d of drives) {
     const label = document.createElement("label");
     label.className = "drive-row";
     label.innerHTML = `<input type="checkbox" value="${escapeHTML(d.id)}" ${selected.has(d.id) ? "checked" : ""}>
       <span class="drive-name">${escapeHTML(d.name || d.id)}</span>`;
     if (selected.has(d.id)) {
-      // Section assignment for included drives.
+      // Tab assignment for included drives — no default, the drive stays on
+      // the placeholder until the user actively picks (or creates) a tab.
       const sel = document.createElement("select");
       sel.className = "drive-section";
       sel.dataset.driveId = d.id;
-      for (const sec of SECTION_ORDER) {
-        const opt = document.createElement("option");
-        opt.value = sec;
-        opt.textContent = `${SECTION_META[sec].icon} ${SECTION_META[sec].label}`;
-        sel.appendChild(opt);
-      }
-      sel.value = SECTION_META[assigned[d.id]] ? assigned[d.id] : "entertainment";
+      populateDriveSectionSelect(sel, assigned[d.id]);
+      sel.addEventListener("change", () => {
+        if (sel.value === "__new__") {
+          createTabTriggerSelect = sel;
+          sel.value = sel.dataset.prev;   // revert now — cancel needs no cleanup
+          openCreateTabForm();
+        } else {
+          sel.dataset.prev = sel.value;
+        }
+      });
       label.appendChild(sel);
 
       const btn = document.createElement("button");
@@ -859,6 +1108,7 @@ async function openSettings() {
     }
     list.appendChild(label);
   }
+  maybeOpenCreateFormNow();
 }
 
 // "Watch on iPhone / iPad" card: show tappable URLs + a QR of the best one.
@@ -939,13 +1189,19 @@ async function saveSettings() {
   const selected = [...$("driveList").querySelectorAll("input:checked")].map((c) => c.value);
   const auto = $("autoRefresh").checked;
   const autoplay = $("autoplayNext") ? $("autoplayNext").checked : true;
-  // Collect section assignments (entertainment = default, no need to store).
+  // Collect tab assignments. There's no "entertainment" default anymore, so
+  // every included drive needs an explicit, live tab — Save is blocked if any
+  // still shows the placeholder (or, transiently, "＋ New tab…").
   // Skip drives the user just unchecked — their row still holds a select.
   const driveSections = {};
   for (const sel of $("driveList").querySelectorAll("select.drive-section")) {
     const cb = sel.closest("label").querySelector("input[type=checkbox]");
     if (cb && !cb.checked) continue;
-    if (sel.value && sel.value !== "entertainment") driveSections[sel.dataset.driveId] = sel.value;
+    if (!sel.value || sel.value === "__new__") {
+      $("settingsMsg").textContent = "Choose a tab for every included drive before saving.";
+      return;
+    }
+    driveSections[sel.dataset.driveId] = sel.value;
   }
   $("settingsMsg").textContent = "Saving…";
   try {
@@ -1333,7 +1589,9 @@ function router() {
   const mTitle = h.match(/^#\/title\/(.+)$/);
   const mBrowseFolder = h.match(/^#\/browse\/drive\/([^/]+)\/folder\/([^/]+)$/);
   const mBrowseDrive = h.match(/^#\/browse\/drive\/([^/]+)$/);
-  const mSection = h.match(/^#\/s\/(\w+)$/);
+  // Tab keys are slugs (lowercase alnum + dashes, e.g. "my-courses"), so the
+  // route must allow dashes — \w alone would silently reject multi-word tabs.
+  const mSection = h.match(/^#\/s\/([\w-]+)$/);
 
   if (mSection) {
     setSection(mSection[1]);
@@ -1372,6 +1630,8 @@ $("browseBack").addEventListener("click", () => { location.hash = "#/"; });
 $("refreshBtn").addEventListener("click", triggerRefresh);
 $("saveSettings").addEventListener("click", saveSettings);
 if ($("remoteAccess")) $("remoteAccess").addEventListener("change", renderRemoteBlock);
+if ($("newSectionCreate")) $("newSectionCreate").addEventListener("click", submitCreateTab);
+if ($("newSectionCancel")) $("newSectionCancel").addEventListener("click", closeCreateTabForm);
 
 // ---------- theme (light / dark) ----------
 // The saved theme is applied before first paint by an inline script in

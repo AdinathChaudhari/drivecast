@@ -264,7 +264,7 @@ The same remote surface powers a **native Fire TV / Android TV app**,
 repo, because it's a separate program (Kotlin + ExoPlayer) that just happens to
 speak drivecast's API. It needed almost nothing new from the server, which is
 the point: the JSON API plus the range-aware stream proxy already were a
-complete client contract. Two small additions closed the gaps:
+complete client contract. A few small additions closed the gaps:
 
 - `GET /api/ping` — the one deliberately **unauthenticated** endpoint. A TV
   has no camera for QR pairing, so the app instead probes the local network
@@ -275,6 +275,17 @@ complete client contract. Two small additions closed the gaps:
   in a *local file path*, which no remote player can use. This endpoint runs
   the same resolution and serves the winning file over HTTP with its real
   MIME type. No format conversion: ExoPlayer parses SRT/VTT/ASS natively.
+- `GET /api/playlist/{title_id}.m3u` (plus a JSON twin) — an ordered M3U of a
+  show's episodes with token-baked stream URLs, so when the app hands a show to
+  VLC it hands over a *playlist*, not one file, and VLC's own Next/Previous
+  buttons walk the season. `?start=<file_id>` trims it to that episode onward;
+  `?shuffle=1&seed=<n>` reorders it with the same SplitMix64 shuffle the app
+  runs, so both sides agree on order episode-for-episode.
+- `GET /api/stream/recent` — VLC returns the *playlist* URL when you quit, not
+  the episode you stopped on. This endpoint reports which files streamed most
+  recently, so the app can figure out where you actually were and report
+  progress against the right episode — Continue Watching stays honest even when
+  VLC drives the playlist itself.
 
 Because ExoPlayer decodes MKV and HEVC in hardware, the browser's format
 whitelist — and the whole VLC/Infuse handoff dance — simply doesn't exist on
@@ -345,12 +356,15 @@ classifies each folder **recursively**:
     into its own tile — so a `Phase 1` folder yields each film inside it
     rather than one bogus `Phase 1` tile.
   - **Bonus-material subfolders** (`Featurettes`, `Extras`, `Bonus`, `Behind the
-    Scenes`, `Deleted Scenes`, `Trailers`) fold into their show as labelled
-    extras pseudo-seasons (see below); inside movie folders they are ignored.
-    Discard folders (`Sample(s)`, `Subs`, `Subtitles`) are skipped outright, and
-    a leading **enumeration prefix** (`01) `, `01.`, `1 - `) is stripped from
-    titles (without touching a title that legitimately *starts* with a number —
-    a digit followed by a plain space, or an all-digit name, is left alone).
+    Scenes`, `Deleted Scenes`, `Trailers`, `Special Features`, `Making Of`, …)
+    become the movie's **`extras`** — labelled groups of bonus clips carried on
+    the record (the same pseudo-season shape shows use), so a film's featurettes
+    are one click away instead of discarded. A collection folder's *shared* bonus
+    folder fans out onto every film it contains. Only **discard** folders
+    (`Sample(s)`, `Subs`, `Subtitles`) hold no library content and are dropped. A
+    leading **enumeration prefix** (`01) `, `01.`, `1 - `) is stripped from titles
+    (without touching a title that legitimately *starts* with a number — a digit
+    followed by a plain space, or an all-digit name, is left alone).
 - Loose videos sitting at a drive's root are parsed by filename: `SxxExx` files
   group into a show; everything else is a standalone movie.
 
@@ -411,21 +425,26 @@ tile) correct no matter which half you refresh. A drive whose scan errors
 keeps its previous titles, and the first refresh after upgrading escalates to
 a full scan to seed the cache.
 
-**Sections.** Each drive is assigned (Settings) to a section —
-Entertainment, Courses, Podcasts, or a **custom private plugin section** — and
-each section gets its own tab, accent colour, classifier and vocabulary.
-Course drives classify into modules/lessons (numbered files ordered properly,
-workbook PDFs as materials, progress rings + a Resume-course button); podcast
-drives become channel tiles. Custom sections are plain `.py` plugins dropped
-into the private user directory (never the repo): they declare a small
-`SECTION` manifest (label, icon, accent, season/episode nouns, mime families)
-plus a pure classifier, and get the full UI — tabs, shelves, audiobooks,
-progress — for free. Audio streams through the exact same Range proxy as
-video — mpv just gets a `--force-window` flag so audio-only playback still
-has a window. Entertainment additionally gets
-**categories** (Movies / TV Shows / Documentaries / Other) from the TMDB
-genres we already fetch for posters — genre 99 is Documentary; a title TMDB
-doesn't know lands in Other. TMDB is never consulted for the other sections
+**Tabs & behaviors.** The nav is split into two concepts. A **behavior** is a
+reusable content-type engine that lives in code: `entertainment` (movie/TV),
+`courses` (modules/lessons), `podcasts` (channel tiles), plus any private `.py`
+plugin dropped into the user directory (never the repo) that declares a small
+`SECTION` manifest — label, icon, accent, season/episode nouns, mime families —
+and a pure classifier. A **tab** is pure user data (`config["tabs"]`: a list of
+`{key,label,icon,behavior,accent?}`) that *picks* a behavior. There are **no
+tabs by default**; you create them in Settings (name + emoji + "behaves like"),
+assign drives to them, and each tab renders with its behavior's classifier,
+accent and vocabulary. So the course-structuring learning is reusable for
+*any* tab that points at the `courses` behavior — not tied to a hardcoded name.
+`section_for_drive()` returns the tab key or `None` (unassigned = shows in no
+tab); nothing falls back to "entertainment" anymore. Existing installs are
+seeded once from their old `drive_sections` (see `migrate_config` in `config.py`
+and `TABS_REFACTOR.md`) so upgrades are invisible. Audio streams through the
+exact same Range proxy as video — mpv just gets a `--force-window` flag so
+audio-only playback still has a window. Tabs whose behavior is `entertainment`
+additionally get **categories** (Movies / TV Shows / Documentaries / Other) from
+the TMDB genres we already fetch for posters — genre 99 is Documentary; a title
+TMDB doesn't know lands in Other. TMDB is never consulted for other behaviors
 (a course named "Intercourse and Communication" would happily match a film).
 
 **Posters, pre-cached.** During the scan, every title that doesn't already have a

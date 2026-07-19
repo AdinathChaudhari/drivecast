@@ -71,14 +71,20 @@ class TMDB:
             return None
         key = self._cache_key(title, year, media_type)
         with self._cache_lock:
-            if key in self._cache:
-                return self._cache[key]
+            hit = key in self._cache
+            cached = self._cache.get(key)
+        if hit:
+            await self._ensure_poster(cached)
+            return cached
 
         async with self._sem:
             # Double-check cache inside the semaphore.
             with self._cache_lock:
-                if key in self._cache:
-                    return self._cache[key]
+                hit = key in self._cache
+                cached = self._cache.get(key)
+            if hit:
+                await self._ensure_poster(cached)
+                return cached
             result = await self._lookup(title, year, media_type)
 
         with self._cache_lock:
@@ -114,6 +120,21 @@ class TMDB:
             "overview": top.get("overview") or None,
             "genre_ids": top.get("genre_ids") or [],
         }
+
+    async def _ensure_poster(self, result):
+        """Guarantee a cached hit's poster image is actually on disk.
+
+        enrich() returns cached lookups without re-querying TMDB, so it must
+        also re-materialise the poster: a file can go missing after the lookup
+        was cached (the title was reclassified and its old poster pruned, or the
+        original download failed after the positive result was cached). Without
+        this, such a title shows a permanent placeholder because nothing ever
+        re-downloads its poster. _download_poster is a no-op when the file
+        already exists, so this costs one stat on the common path.
+        """
+        pk = result.get("poster_key") if isinstance(result, dict) else None
+        if pk:
+            await self._download_poster("/" + pk, pk)
 
     async def _download_poster(self, poster_path, poster_key):
         dest = os.path.join(config.POSTERS_DIR, poster_key)

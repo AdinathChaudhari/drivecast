@@ -55,6 +55,21 @@ SAMPLE_STATUS_XML = """<?xml version="1.0" encoding="utf-8"?>
 </root>"""
 
 
+def test_build_infuse_url_basic():
+    url = player.build_infuse_url("http://127.0.0.1:8737/stream/abc123")
+    assert url == (
+        "infuse://x-callback-url/play?url=http%3A%2F%2F127.0.0.1%3A8737%2Fstream%2Fabc123"
+    )
+
+
+def test_build_infuse_url_resume_name_sub():
+    url = player.build_infuse_url("http://u/s", resume=42.9, name="My Movie (2020).mkv",
+                                  sub_url="http://u/api/subtitles/abc")
+    prefix, rest = url.split("url=", 1)
+    assert rest.startswith("http%3A%2F%2Fu%2Fs&position=42&filename=My%20Movie%20%282020"
+                           "%29.mkv&sub=http%3A%2F%2Fu%2Fapi%2Fsubtitles%2Fabc")
+
+
 def test_parse_vlc_status_reads_time_and_length():
     assert player.parse_vlc_status(SAMPLE_STATUS_XML) == (742.0, 3600.0)
 
@@ -135,6 +150,49 @@ def test_advance_skips_when_session_superseded():
     stop.set()  # a newer play() replaced this session
     pm._advance("mpv", "/mpv", QUEUE, "drv", "s1", stop)
     assert pm._calls == []
+
+
+def test_detect_player_infuse(monkeypatch):
+    monkeypatch.setattr(player.os.path, "exists", lambda p: p == player.INFUSE_APP)
+    assert player.detect_player("infuse") == ("infuse", player.INFUSE_APP)
+
+
+def test_detect_player_auto_never_picks_infuse(monkeypatch):
+    # Infuse is the ONLY thing "installed"; auto must still find nothing.
+    monkeypatch.setattr(player.shutil, "which", lambda n: None)
+    monkeypatch.setattr(player.os.path, "exists", lambda p: p == player.INFUSE_APP)
+    assert player.detect_player("auto") == (None, None)
+    assert player.detect_player() == (None, None)
+
+
+class _RecordingHistory:
+    def __init__(self):
+        self.updates = []
+
+    def update(self, *a, **k):
+        self.updates.append((a, k))
+
+    def resume_position(self, file_id):
+        return 0
+
+    def mark_watched(self, *a, **k):
+        pass
+
+
+def test_launch_infuse_seeds_history_no_poller(monkeypatch):
+    history = _RecordingHistory()
+    pm = PlayerManager({"player": "infuse"}, history=history, base_url="http://127.0.0.1:8737")
+    calls = []
+    monkeypatch.setattr(player.subprocess, "Popen", lambda args: calls.append(args))
+    pm._launch_infuse("fid", "Name", "http://127.0.0.1:8737/stream/fid", 0, 123.0, "drv", "par")
+    assert len(calls) == 1
+    assert calls[0][0] == "open"
+    assert calls[0][1].startswith("infuse://x-callback-url/play?url=")
+    assert len(history.updates) == 1
+    _, kwargs = history.updates[0]
+    assert kwargs["force"] is True
+    assert kwargs["duration"] == 123.0
+    assert pm._session is None
 
 
 def test_build_args_include_subtitle_path():

@@ -58,6 +58,10 @@ _SAMPLE_RE = re.compile(r"\b(?:sample|trailer|featurette|extra|extras)\b", re.IG
 _BONUS_FOLDERS = {
     "featurettes", "extras", "bonus", "behind the scenes", "deleted scenes",
     "trailers",
+    # Broadened vocabulary so common real-world bonus folders are recognised
+    # (feeds both the show extras pseudo-seasons and movie extras).
+    "special features", "bonus features", "bonus material",
+    "making of", "the making of", "interviews",
 }
 _DISCARD_FOLDERS = {"sample", "samples", "subs", "subtitles"}
 _EXTRAS_FOLDERS = _BONUS_FOLDERS | _DISCARD_FOLDERS

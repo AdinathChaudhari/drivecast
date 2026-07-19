@@ -3,32 +3,43 @@
 Stream video (and audio) straight from your Google **Shared Drives** — no
 downloads, no syncing. drivecast is a tiny local web app that presents your
 Shared Drives as a **cached media library** — movie and TV-show tiles with
-pre-fetched posters, seasons and episodes — and plays files in mpv / IINA / VLC
+pre-fetched posters, seasons and episodes — and plays files in mpv / IINA / VLC / Infuse
 while proxying the bytes on demand. Nothing is ever written to disk.
 
 > 📖 **[Read the case study](CASE-STUDY.md)** — how this was designed, built,
 > hardened and shipped, almost entirely through orchestrated AI agents.
 
-**Sections.** The app is split into four areas, each with its own tab, accent
-colour and vocabulary — assign each drive to one in **Settings** (unassigned
-drives stay in Entertainment; the tab bar only appears once you assign
-something):
+**Tabs & behaviors.** You organise the app into **tabs** you create yourself —
+there are **no tabs by default**. In **Settings**, pick a drive's category from
+the dropdown or choose **＋ New tab…** to make one: give it a **name** and an
+**emoji**, and choose how it **behaves** (which built-in content-type learning
+it reuses). A tab is just data; the *behavior* is the reusable engine:
 
-- 🍿 **Entertainment** — movies & TV shows, with category chips
+- 🍿 **Movies & TV** (`entertainment`) — movies & TV shows, with category chips
   (Movies / TV Shows / Documentaries / Other) derived from TMDB genres.
-- 🎓 **Courses** — course drives become courses with **Modules** and
-  **Lessons**: numbered lesson files are ordered correctly, module folders
+- 🎓 **Course** (`courses`) — a course drive becomes courses with **Modules**
+  and **Lessons**: numbered lesson files are ordered correctly, module folders
   become a module picker, workbook PDFs appear as **Materials**, tiles carry a
   **progress ring**, and **Resume course** continues from your first unwatched
-  lesson (autoplay chains the rest of the course).
-- 🎙 **Podcasts** — each folder on a podcasts drive (e.g. YouTube downloads)
-  becomes a channel tile with its episodes; audio files stream to mpv exactly
-  like video, with resume.
-- **Custom private sections** — drop a plugin `.py` into
-  `~/Library/Application Support/drivecast/sections/` (same private home as
-  your secrets, never part of the repo) to add a fully personal section with
-  its own tab, accent colour, vocabulary and classifier — see the docstring in
-  `drivecast/sections.py` for the tiny plugin contract.
+  lesson. *Any* tab you point at this behavior gets the whole course-structuring
+  learning — so a "Work Courses" tab and a "Personal Courses" tab both work alike.
+- 🎙 **Podcast** (`podcasts`) — each folder on the drive (e.g. YouTube
+  downloads) becomes a channel tile with its episodes; audio streams to mpv
+  exactly like video, with resume.
+
+So you can make a personal **Home Videos 🎥** tab (behaves like *Movies & TV*),
+point a drive at it, and its titles get their own tab with posters and chips —
+no code, no dependence on the built-in names.
+
+**Custom private behaviors.** For a bespoke classifier, drop a plugin `.py` into
+`~/Library/Application Support/drivecast/sections/` (same private home as your
+secrets, never part of the repo); it registers a new **behavior** that your tabs
+can then adopt — see the docstring in `drivecast/sections.py` and
+`TABS_REFACTOR.md` for the model and the tiny plugin contract.
+
+**Upgrading?** Existing setups migrate automatically: whatever you'd assigned
+(Entertainment / Courses / Podcasts / a private plugin) is seeded as matching
+tabs on first launch, so your library looks exactly the same — nothing to redo.
 
 **Library model.** You pick which Shared Drives to include (Settings, or the
 menu-bar app). drivecast scans those drives **once** and caches a structured
@@ -52,9 +63,12 @@ available behind a demoted **Browse files** link.
 folder (`Phase 1`, `Classics`, `Trilogy Box`, `Saga Collection`, …) that
 holds many films — as loose files or one-movie subfolders, possibly nested —
 surfaces **each film as its own tile** rather than one wrong tile named after the
-folder. A leading enumeration prefix (`01) `, `01.`, `1 - `) is stripped from
-titles. TV shows (season subfolders or episode-marked files) are still detected
-and kept as a single show tile.
+folder. Bonus-material subfolders (`Featurettes`, `Extras`, `Behind the Scenes`,
+`Special Features`, …) become a movie's **Extras** — a list of bonus clips shown
+below the Play button, just like a show's featurette pseudo-seasons (a collection's
+*shared* bonus folder appears on every film in it). A leading enumeration prefix
+(`01) `, `01.`, `1 - `) is stripped from titles. TV shows (season subfolders or
+episode-marked files) are still detected and kept as a single show tile.
 
 **Featurettes & extras stay inside their show.** Bonus-material folders
 (`Featurettes`, `Extras`, `Bonus`, `Behind the Scenes`, `Deleted Scenes`,
@@ -64,9 +78,8 @@ folder, beside bare `Season N` folders at a drive root, or inside a
 pseudo-seasons listed at the end of the season picker (`Featurettes`,
 `Featurettes · Season 2`, …). They play like episodes but stay out of the
 season count and Shuffle. Junk folders (`Sample(s)`, `Subs`, `Subtitles`) are
-dropped outright, and inside a movie folder bonus folders are still ignored.
-One guard: a root extras folder on a drive with no single owning show keeps
-its own tile rather than guessing the wrong owner.
+dropped outright. One guard: a root extras folder on a drive with no single
+owning show keeps its own tile rather than guessing the wrong owner.
 
 **Robust season detection.** Season subfolders survive messy release naming.
 Beyond `Season 1` / `S01`, drivecast de-noises a folder name (dropping bracketed
@@ -147,9 +160,13 @@ default (it needs no extra interface); if VLC's HTTP interface can't start
 
 **Choosing a player.** By default drivecast auto-picks mpv → IINA → VLC. To force
 one, use **Settings → Video player** in the app (it shows which players are
-installed), or set `"player"` in `config.json` to `auto` / `mpv` / `iina` / `vlc`.
+installed), or set `"player"` in `config.json` to `auto` / `mpv` / `iina` / `vlc` / `infuse`.
 Playback works the same in any of them (each streams the local URL by requesting
-byte-ranges); all three now report your position back for resume.
+byte-ranges); all three now report your position back for resume. **Infuse**
+(Mac App Store) is supported as a launch-only target: drivecast opens the
+stream via Infuse's URL scheme, so playback works great but there is no resume
+tracking, Continue Watching, or autoplay-next for it (Infuse keeps its own
+internal resume). Auto never picks Infuse — select it explicitly.
 
 ### 4. (Optional) TMDB posters
 
@@ -245,6 +262,9 @@ player can't do:
 - **Made for a remote** — D-pad rows, focus scaling, media keys; a
   Netflix-style Home with the Continue Watching shelf (dismissable there
   too) and one row per section.
+- **Binge without lifting a finger** — when it hands a show to VLC it hands
+  over a *playlist* of the remaining episodes, so VLC's own Next/Previous walk
+  the season; there's also a Shuffle button for random-order play.
 - **Auto-discovery** — the app finds your Mac by probing the network for
   drivecast's unauthenticated `GET /api/ping`, so pairing is just typing the
   access token.
@@ -360,9 +380,9 @@ existing instance in your browser and exits (it won't start a second server).
 
 rclone must be set up on the machine (see **Setup** above) — the app reads the
 Drive token from your rclone config exactly like `app.py` does. A player
-(mpv / IINA / VLC) is needed to actually play video; all three support resume
-tracking (VLC via its HTTP interface), with mpv the recommended default
-(`brew install mpv`).
+(mpv / IINA / VLC, plus Infuse launch-only) is needed to actually play video;
+mpv / IINA / VLC support resume tracking (VLC via its HTTP interface), with mpv
+the recommended default (`brew install mpv`).
 
 ### Build the bundle
 
@@ -456,13 +476,15 @@ Once `app.py` is running and the library opens in your browser:
    you're watching. To refresh a **single drive** (you know where you just
    uploaded), hover it in Settings for its ⟳ button, or use the menu-bar
    **Refresh one drive** submenu.
-9. **Sections.** Assign drives to **Courses / Podcasts** (or a custom plugin section) with the
-   dropdown next to each included drive in Settings. Saving re-scans just the
-   drives whose section changed. Each section gets its own tab, accent colour
-   and layout (course progress rings, module/lesson naming, audiobook buttons,
-   channel tiles). Entertainment titles get **category chips** — Documentaries
-   are detected from TMDB genres, and titles TMDB doesn't know land under
-   *Other*. Optional per-drive hints live in `config.json` (`drive_hints`):
+9. **Tabs.** Create tabs in Settings (**＋ New tab…** in the per-drive dropdown):
+   name + emoji + a **behavior** (Movies & TV / Course / Podcast, or a private
+   plugin behavior). Then assign drives to your tabs. There are no tabs by
+   default; an included drive you haven't put in a tab yet simply shows nothing
+   until you assign it. Saving re-scans just the drives whose tab changed. Each
+   tab gets its own accent colour and its behavior's layout (course progress
+   rings, module/lesson naming, channel tiles). Tabs that behave like *Movies &
+   TV* get **category chips** — Documentaries are detected from TMDB genres, and
+   titles TMDB doesn't know land under *Other*. Optional per-drive hints live in `config.json` (`drive_hints`):
    `{"<drive_id>": {"category": "documentary"}}` categorises a whole drive's
    TMDB misses, and `{"<drive_id>": {"single_course": true}}` treats a drive
    as ONE course whose root folders are modules.
@@ -546,7 +568,8 @@ only — secrets go in `secrets/` (above).
 | `https_port`   | `8738`    | trusted-LAN HTTPS listener (only started when `remote_access` is on) |
 | `page_size`    | `200`     | Drive files.list page size                          |
 | `selected_drives` | `[]`   | Shared Drive ids included in the library            |
-| `drive_sections` | `{}`    | drive id → `entertainment`\|`courses`\|`podcasts`\|custom |
+| `tabs`         | `[]`      | your tabs: `[{key,label,icon,behavior,accent?,accent2?}]` (seeded from a pre-tabs config on first launch) |
+| `drive_sections` | `{}`    | drive id → a tab `key` from `tabs` (unassigned = shows in no tab) |
 | `drive_hints`  | `{}`      | per-drive classifier hints (`category`, `single_course`) |
 | `auto_refresh_on_startup` | `false` | rescan the library on each launch        |
 | `scan_throttle` | `0.15`   | seconds to pause between scan API calls (quota)     |

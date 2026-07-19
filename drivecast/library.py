@@ -13,6 +13,7 @@ Design split:
     library, prunes orphaned posters, and writes atomically.
 """
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -39,6 +40,13 @@ def migrate_library_v1(data, drive_sections=None):
     Stamps the fields v2 records carry so the app is fully functional before
     the first rescan: section (from the drive assignment), category (None =
     provisional until a TMDB pass), media, source_drives.
+
+    `section_for_drive` now returns None for a drive with no live tab (e.g. a
+    since-deselected drive, or one whose tab was deleted) — config migration
+    always runs before this (see config.load_config/migrate_config), so by
+    the time this executes, a still-selected drive already resolves to
+    whatever tab it was seeded/assigned into. A None here is harmless: the
+    record is simply invisible until the next scan prunes or reassigns it.
     """
     for rec in (data.get("titles") or {}).values():
         rec.setdefault("section",
@@ -336,6 +344,21 @@ def _movie_record(node, video, from_folder):
     }
 
 
+def _movie_extras(node):
+    """Labelled extras pseudo-season entries from a movie node's bonus
+    subfolders (Featurettes/Extras/Trailers/...), or [] when there are none.
+
+    Reuses the exact machinery the show path uses (_extras_seasons); discard
+    folders (Sample/Subs) contribute nothing.
+    """
+    pairs = []
+    for sf in node["subfolders"]:
+        if naming.is_bonus_folder(sf["name"]):
+            label = (sf["name"] or "").strip() or "Extras"
+            pairs.extend((label, v) for v in _all_videos(sf))
+    return _extras_seasons(pairs)
+
+
 def _expand_movies(node):
     """Expand a non-show node into movie records, recursing into subfolders.
 
@@ -343,21 +366,46 @@ def _expand_movies(node):
       named from the FOLDER; multiple videos -> one movie per video (file-named).
     * container (has non-extras subfolders): each stray direct video becomes a
       file-named movie, plus the recursion into each non-extras subfolder.
-    Extras subfolders (Featurettes/Extras/...) are ignored entirely.
+    Bonus subfolders (Featurettes/Extras/...) become an ``extras`` list on the
+    movie record(s) instead of being discarded: attached to the single film for
+    a per-movie folder, or fanned onto every sibling film for a collection
+    folder with a shared bonus folder (e.g. a trilogy's shared Featurettes).
+    Discard subfolders (Sample/Subs) are still dropped entirely.
     """
     direct = [v for v in node["videos"] if not naming.is_sample(v["name"])]
     subs = [sf for sf in node["subfolders"] if not naming.is_extras_folder(sf["name"])]
+    extras = _movie_extras(node)
 
     if not subs:
         if not direct:
             return []
         if len(direct) == 1:
-            return [_movie_record(node, direct[0], from_folder=True)]
-        return [_movie_record(node, v, from_folder=False) for v in direct]
+            rec = _movie_record(node, direct[0], from_folder=True)
+            if extras:
+                rec["extras"] = extras
+            return [rec]
+        recs = [_movie_record(node, v, from_folder=False) for v in direct]
+        for rec in recs:
+            if extras:
+                rec["extras"] = copy.deepcopy(extras)
+        return recs
 
     records = [_movie_record(node, v, from_folder=False) for v in direct]
     for sf in subs:
         records.extend(classify_node(sf))
+    # A collection folder with a SHARED bonus folder beside the film subfolders:
+    # fan the extras onto every film the recursion produced (appended, so a
+    # film's own Featurettes folder is preserved). If the recursion yielded a
+    # single show instead, the shared extras fold into it as pseudo-seasons.
+    if extras:
+        movies = [r for r in records if r.get("type") == "movie"]
+        shows = [r for r in records if r.get("type") == "show"]
+        if movies:
+            for r in movies:
+                r["extras"] = list(r.get("extras") or []) + copy.deepcopy(extras)
+        elif len(shows) == 1:
+            shows[0]["seasons"] = (list(shows[0].get("seasons") or [])
+                                   + copy.deepcopy(extras))
     return records
 
 
@@ -492,11 +540,13 @@ def group_seasons(records, drive_names):
     """Merge sibling season-folders (and single-show drives) into one show each.
 
     Handles the two layouts that otherwise show one tile per season:
-      * bare "Season N" top-level folders  -> the DRIVE is the show (name = drive)
+      * bare "Season N" top-level folders  -> the DRIVE is the show; keyed by
+        the immutable drive id, so renaming the drive keeps the show's record
+        id stable (only its display title follows the new name). Two same-named
+        such drives therefore stay separate shows rather than merging.
       * "<Show> Season N" sibling folders  -> grouped by the shared show prefix
     Nested "Show/Season N" folders already classify correctly and pass through.
-    Records sharing a normalised key merge across drives too (e.g. a show split
-    into "... (Part 1)" / "(Part 2)" drives).
+    Prefixed-folder shows sharing a normalised key merge across drives too.
     """
     groups = {}          # key -> {"display","drive_id","year","members":[(season,rec)]}
     order = []           # preserve first-seen ordering for stable output
@@ -512,7 +562,11 @@ def group_seasons(records, drive_names):
         if fname is not None:
             ps = naming.pure_season(fname)
             if ps is not None:
-                key = _norm_key(drive_name) or ("drive:" + str(drive_id))
+                # The drive IS the show: key on the immutable drive id so a
+                # drive rename can't change the persisted record id (which would
+                # drop all carried metadata). The display title still follows
+                # the current drive name so renames stay visible on rescan.
+                key = "drive:" + str(drive_id)
                 display = _clean_show_name(drive_name) or "Unknown"
                 season_num = ps
             else:
@@ -620,25 +674,70 @@ def split_extras_records(records):
     return main, extras
 
 
+# A root-level extras folder on a drive with several shows attaches to the
+# drive's headline show only when it has at least this many times the
+# runner-up's episodes ("the drive is basically this show"); below it, and with
+# no season-overlap signal, the folder stays its own tile.
+_EXTRAS_DOMINANCE_RATIO = 2
+
+
+def _pick_extras_owner(shows, members):
+    """Which of several same-drive shows owns a root extras folder, or None.
+
+    Tier 1 (season overlap): the extras folder's internal season numbers vs
+    each show's present seasons — a strictly-best, non-zero overlap wins (e.g.
+    a "Featurettes/Season 5" beside an S1-7 show and an S1-3 show is decisive).
+    Tier 2 (episode dominance): on a tie or no overlap, the show with at least
+    _EXTRAS_DOMINANCE_RATIO x the runner-up's episodes owns the drive's
+    identity. None = genuinely ambiguous; the caller keeps the tile.
+
+    Only non-``extras`` seasons count on both sides: a grouped show's own
+    member-folder extras (group_seasons) must not skew the season set or counts.
+    """
+    def real(rec):
+        return [s for s in rec.get("seasons") or [] if not s.get("extras")]
+
+    ex_seasons = {s.get("season") for m in members if m.get("type") == "show"
+                  for s in (m.get("seasons") or [])
+                  if s.get("episodes") and s.get("season") is not None
+                  and not s.get("extras")}
+    if ex_seasons:
+        scores = [len(ex_seasons & {s.get("season") for s in real(sh)})
+                  for sh in shows]
+        ranked = sorted(range(len(shows)), key=scores.__getitem__, reverse=True)
+        if scores[ranked[0]] > 0 and scores[ranked[0]] > scores[ranked[1]]:
+            return shows[ranked[0]]
+
+    counts = [sum(len(s.get("episodes") or []) for s in real(sh)) for sh in shows]
+    ranked = sorted(range(len(shows)), key=counts.__getitem__, reverse=True)
+    if (counts[ranked[0]] > 0
+            and counts[ranked[0]] >= _EXTRAS_DOMINANCE_RATIO * counts[ranked[1]]):
+        return shows[ranked[0]]
+    return None
+
+
 def attach_extras(records, extras_records):
     """Fold standalone extras records into the show they sit beside.
 
     Runs AFTER group_seasons, so a drive laid out as bare "Season N" folders
     plus a sibling "Featurettes" folder attaches to the merged drive-show.
-    Target: the single show record sourced from the extras record's drive.
-    With no (or several) candidate shows the extras record keeps its own tile
-    — better a stray tile than featurettes attached to the wrong show.
+    A single show on the drive owns the extras outright; with several shows,
+    _pick_extras_owner disambiguates (season overlap, then episode dominance)
+    and only a genuine tie leaves the extras record as its own tile.
     """
     if not extras_records:
         return records
     shows_by_drive = {}
+    movies_by_drive = {}
     for rec in records:
-        if rec.get("type") != "show":
-            continue
         drives = rec.get("source_drives") or (
             [rec["drive_id"]] if rec.get("drive_id") else [])
-        for d in drives:
-            shows_by_drive.setdefault(d, []).append(rec)
+        if rec.get("type") == "show":
+            for d in drives:
+                shows_by_drive.setdefault(d, []).append(rec)
+        elif rec.get("type") == "movie":
+            for d in drives:
+                movies_by_drive.setdefault(d, []).append(rec)
 
     # One extras folder can classify as several records (a leaf folder with
     # loose clips expands one movie per file) — regroup by (drive, folder).
@@ -654,13 +753,26 @@ def attach_extras(records, extras_records):
     leftovers = []
     for drive_id, label in order:
         members = groups[(drive_id, label)]
-        targets = shows_by_drive.get(drive_id) or []
-        if len(targets) != 1:
+        shows = shows_by_drive.get(drive_id) or []
+        movies = movies_by_drive.get(drive_id) or []
+        # A single show owns the extras; several shows -> disambiguate (or
+        # None); else a lone loose movie gets them on its `extras` field.
+        # Genuinely ambiguous folders stay a tile.
+        if len(shows) == 1:
+            target = shows[0]
+        elif len(shows) > 1:
+            target = _pick_extras_owner(shows, members)
+        else:
+            target = None
+        if target is not None:
+            target["seasons"] = (list(target.get("seasons") or [])
+                                 + _extras_entries(members, label))
+        elif not shows and len(movies) == 1:
+            target = movies[0]
+            target["extras"] = (list(target.get("extras") or [])
+                                + _extras_entries(members, label))
+        else:
             leftovers.extend(members)
-            continue
-        target = targets[0]
-        target["seasons"] = (list(target.get("seasons") or [])
-                             + _extras_entries(members, label))
     return records + _strip_transient(leftovers)
 
 
@@ -713,12 +825,18 @@ def merge_existing_metadata(old_titles, new_titles):
         old = old_titles.get(tid)
         if not old:
             continue
-        # A record reclassified into a different section keeps NOTHING: its
-        # old TMDB poster/overview (matched as a film) would be wrong for a
+        # A record reclassified into a different TAB keeps NOTHING: its old
+        # TMDB poster/overview (matched as a film) would be wrong for a
         # course/series, and a stale poster would block the cover-image
-        # fallback forever.
-        if ((old.get("section") or "entertainment")
-                != (rec.get("section") or "entertainment")):
+        # fallback forever. Compare the raw tab keys directly — there is no
+        # more "entertainment" fallback to paper over a missing/None section.
+        if old.get("section") != rec.get("section"):
+            continue
+        # Same id, different title = a rename (drive-is-the-show groups keep
+        # their id across a drive rename). The old poster/tmdb/overview/category
+        # described the OLD name; drop them so they recompute against the new
+        # title instead of carrying stale enrichment forever.
+        if (old.get("title") or "") != (rec.get("title") or ""):
             continue
         for k in ("poster", "tmdb_id", "overview", "category"):
             if old.get(k) and not rec.get(k):
@@ -809,6 +927,20 @@ class Library:
                     "parent_id": rec.get("folder_id"),  # the movie's folder
                 }
                 owners[rec["file_id"]] = rec.get("id")
+                # Featurettes/extras clips are playable too: index their files
+                # so play/HEAD lookups and history resolve to the movie.
+                for grp in rec.get("extras") or []:
+                    for ep in grp.get("episodes", []):
+                        if ep.get("file_id"):
+                            idx[ep["file_id"]] = {
+                                "name": ep.get("name"),
+                                "size": ep.get("size"),
+                                "duration_ms": ep.get("duration_ms"),
+                                "media": ep.get("media") or "video",
+                                "drive_id": rec.get("drive_id"),
+                                "parent_id": ep.get("parent_id"),
+                            }
+                            owners[ep["file_id"]] = rec.get("id")
             elif rec.get("type") == "show":
                 for season in rec.get("seasons", []):
                     for ep in season.get("episodes", []):
@@ -887,6 +1019,12 @@ class Library:
             if rec.get("type") == "movie" and rec.get("file_id"):
                 api.seed_meta(self._meta(rec["file_id"], rec.get("title"),
                                          rec.get("size"), rec.get("duration_ms")))
+                for grp in rec.get("extras") or []:
+                    for ep in grp.get("episodes", []):
+                        if ep.get("file_id"):
+                            api.seed_meta(self._meta(
+                                ep["file_id"], ep.get("name"),
+                                ep.get("size"), ep.get("duration_ms")))
             elif rec.get("type") == "show":
                 for season in rec.get("seasons", []):
                     for ep in season.get("episodes", []):
@@ -937,6 +1075,9 @@ class Scanner:
         self.status = {
             "running": False, "scanned": 0, "total": 0,
             "added": 0, "removed": 0, "error": None, "scope": [],
+            # Non-fatal: drives that were scanned-over but skipped because
+            # they aren't assigned to any live tab (see scan()'s loop).
+            "warning": None,
         }
 
     async def _throttle(self):
@@ -989,11 +1130,13 @@ class Scanner:
                 node["files"].append(_file_dict(c, node["id"]))
         return node
 
-    async def _scan_drive(self, drive_id, section="entertainment", hints=None,
-                          drive_name=""):
+    async def _scan_drive(self, drive_id, section, hints=None, drive_name=""):
         """Return the list of title records for one drive, or None if the
         drive's root couldn't be listed (caller keeps the previous cache
-        entry so a flaky drive doesn't empty its titles). Never raises."""
+        entry so a flaky drive doesn't empty its titles). Never raises.
+
+        `section` is a TAB key and must never be None here — scan() already
+        filtered out drives with no live tab assignment before calling in."""
         kinds = sections.mimes_for(section)
         try:
             root = await self._list_folder(drive_id, drive_id, kinds)
@@ -1025,22 +1168,33 @@ class Scanner:
                               hints or {})
 
     def _classify(self, section, drive_id, drive_name, nodes, loose, hints):
-        """Dispatch walked nodes + loose root files to the section's classifier."""
-        if section == "courses":
+        """Dispatch walked nodes + loose root files to the TAB's BEHAVIOR classifier.
+
+        `section` is a TAB key; the actual dispatch happens on the BEHAVIOR
+        that tab is built on (multiple tabs can share one behavior, e.g. two
+        "courses" tabs fed by different drives — both must dispatch to the
+        course classifier). Falls back to treating `section` itself as the
+        behavior key if the tab can't be resolved (defensive; scan() already
+        guards against a None section reaching here).
+        """
+        base = sections.behavior_for(section) or section
+        if base == "courses":
             from .courses import classify_course_drive
             return classify_course_drive(drive_id, drive_name, nodes, loose, hints)
-        if section == "podcasts":
+        if base == "podcasts":
             from .playlists import classify_playlist_drive
             return classify_playlist_drive(drive_id, drive_name, nodes, loose)
-        plugin_classify = sections.classify_for(section)
+        plugin_classify = sections.classify_for(base)
         if plugin_classify is not None:
             # Custom private section (see sections.py): plugin classifiers
             # receive the same node shape as the built-ins.
             try:
                 return plugin_classify(drive_id, drive_name, nodes, loose)
             except Exception:  # pragma: no cover - a plugin must not kill scans
-                log.exception("Custom section %r classifier failed", section)
+                log.exception("Custom section %r (behavior %r) classifier failed",
+                             section, base)
                 return []
+        # Entertainment (or an unresolvable base): the plain movie/show walk.
         records = []
         for node in nodes:
             records.extend(classify_node(node))
@@ -1124,15 +1278,28 @@ class Scanner:
         if any(not self.cache.has(d) for d in selected if d not in scope):
             scope = list(selected)
         self.status.update(running=True, scanned=0, total=len(scope),
-                           added=0, removed=0, error=None, scope=list(scope))
+                           added=0, removed=0, error=None, warning=None,
+                           scope=list(scope))
         try:
             try:
                 drive_names = {d["id"]: d.get("name", "") for d in await self.api.list_drives()}
             except Exception:
                 drive_names = {}
 
+            unassigned = []
             for drive_id in scope:
                 section = sections.section_for_drive(drive_sections, drive_id)
+                if section is None:
+                    # No live tab claims this drive (never assigned, or its
+                    # tab was since deleted). Don't touch the cache: the old
+                    # scan-cache entry for this drive stays put so simply
+                    # reassigning it to a tab later is a cheap re-walk, not a
+                    # full rescan. Count it "scanned" (it WAS visited) but
+                    # skip classification entirely.
+                    log.warning("Drive %s has no tab assignment; skipping scan", drive_id)
+                    unassigned.append(drive_id)
+                    self.status["scanned"] += 1
+                    continue
                 records = await self._scan_drive(
                     drive_id, section, drive_hints.get(drive_id) or {},
                     drive_names.get(drive_id, ""))
@@ -1145,27 +1312,79 @@ class Scanner:
                     rec.setdefault("media", "video")
                 self.cache.put(drive_id, records)
             self.cache.prune(selected)
+            if unassigned:
+                self.status["warning"] = (
+                    "%d drive(s) need a tab assignment in Settings: %s"
+                    % (len(unassigned), ", ".join(sorted(unassigned))))
 
-            # Rebuild from cached raw records of ALL selected drives (deep
-            # copies — group_seasons mutates its input).
+            # Rebuild from cached raw records of every selected drive that's
+            # STILL assigned to a live tab (deep copies — group_seasons
+            # mutates its input). A drive whose tab was deleted since its
+            # last successful scan must not resurrect its cached records
+            # under a now-dead section key.
             all_records = []
             for drive_id in selected:
+                if sections.section_for_drive(drive_sections, drive_id) is None:
+                    continue
                 all_records.extend(self.cache.get(drive_id))
 
-            # Season-merging is an ENTERTAINMENT concept: a course or podcast
-            # named "... Part 1" must never merge as someone's season.
-            ent = [r for r in all_records
-                   if r.get("section", "entertainment") == "entertainment"]
-            rest = [r for r in all_records
-                    if r.get("section", "entertainment") != "entertainment"]
-            # Standalone extras folders (a drive-root "Featurettes" beside the
-            # show's season folders) fold into their show after grouping.
-            ent, ent_extras = split_extras_records(ent)
-            grouped = attach_extras(group_seasons(ent, drive_names), ent_extras)
+            # Season-merging is an ENTERTAINMENT-BEHAVIOR concept: a course or
+            # podcast named "... Part 1" must never merge as someone's season.
+            # There is no single entertainment pool anymore — tabs are data,
+            # and two different entertainment-behavior tabs must never merge
+            # into each other's records — so records are bucketed PER TAB and
+            # grouped independently; a grp:/extras record is stamped with its
+            # own bucket's tab key, never a neighboring tab's.
+            ent_buckets = {}   # tab key -> records, for entertainment-behavior tabs
+            rest = []
+            for r in all_records:
+                sec = r.get("section")
+                if sections.behavior_for(sec) == "entertainment":
+                    ent_buckets.setdefault(sec, []).append(r)
+                else:
+                    rest.append(r)
+
+            # group_seasons() derives a "grp:" id from the show's normalised
+            # NAME alone (see its docstring) — fine when there was one global
+            # entertainment pool, but two DIFFERENT entertainment-behavior
+            # tabs that each happen to have a "<Show> Season N" pattern for
+            # the same show name would otherwise mint the IDENTICAL id and
+            # silently clobber each other in new_titles below. Only
+            # disambiguate when more than one entertainment-behavior tab is
+            # actually in play, so the overwhelmingly common single-tab install
+            # keeps its "grp:" ids byte-for-byte stable.
+            #
+            # NB: decide this from the CONFIGURED tab list, not from how many
+            # buckets happened to produce records in THIS scan. Keying off the
+            # transient ent_buckets would flip the flag the moment an unrelated
+            # second entertainment tab starts/stops contributing, silently
+            # rehashing the grp: ids of *unchanged* tabs — which then miss in
+            # merge_existing_metadata() by id and lose their category/poster/
+            # added_at. The configured count only changes when the user
+            # deliberately adds/removes an entertainment tab (a one-time
+            # transition), so unchanged tabs keep stable ids across scans.
+            multi_ent_tabs = sum(
+                1 for t in sections.tabs()
+                if sections.behavior_for(t.get("key")) == "entertainment"
+            ) > 1
+            grouped = []
+            for tab_key, bucket in ent_buckets.items():
+                # Standalone extras folders (a drive-root "Featurettes" beside
+                # the show's season folders) fold into their show after
+                # grouping, per bucket so cross-tab folding can't happen.
+                bucket, bucket_extras = split_extras_records(bucket)
+                bucket_grouped = attach_extras(
+                    group_seasons(bucket, drive_names), bucket_extras)
+                for rec in bucket_grouped:
+                    rec["section"] = tab_key
+                    if multi_ent_tabs and rec.get("id", "").startswith("grp:"):
+                        rec["id"] = "grp:" + hashlib.sha1(
+                            ("%s|%s" % (tab_key, rec["id"])).encode("utf-8")
+                        ).hexdigest()[:16]
+                grouped.extend(bucket_grouped)
             grouped = grouped + _strip_transient(rest)
             new_titles = {rec["id"]: rec for rec in grouped}
             for rec in new_titles.values():
-                rec.setdefault("section", "entertainment")
                 rec.setdefault("media", "video")
                 rec.setdefault("category", None)
 
@@ -1181,15 +1400,28 @@ class Scanner:
             # configured; titles that already have a poster are skipped.
             if self.tmdb.enabled:
                 for rec in new_titles.values():
-                    # TMDB is for entertainment only: a course like
+                    # TMDB is for entertainment BEHAVIOR only: a course like
                     # "Intercourse and Communication" would happily match a
-                    # film. Other sections poster via Drive thumbnails.
-                    if rec.get("section", "entertainment") != "entertainment":
+                    # film. Other tabs poster via Drive thumbnails. Gated on
+                    # the tab's BEHAVIOR, not its key, so a user-renamed
+                    # entertainment tab still gets posters.
+                    if sections.behavior_for(rec.get("section")) != "entertainment":
                         continue
                     poster = rec.get("poster") or ""
-                    # dthumb_ fallbacks stay upgradeable: retry TMDB until it
-                    # matches, so enabling a key later still fills real posters.
-                    if not poster or poster.startswith("dthumb_"):
+                    # Re-resolve when there's no poster yet, an upgradeable
+                    # dthumb_ fallback, OR a TMDB poster key whose cached image
+                    # file has gone missing (pruned when the title was
+                    # reclassified, or a download that failed after the lookup
+                    # was cached). Without the last case a dangling key shows a
+                    # permanent placeholder — the record has a poster name but
+                    # no file, so neither this test nor the category pass below
+                    # (which skips already-categorised titles) ever refetches
+                    # it. _resolve_poster -> enrich() re-materialises the file.
+                    tmdb_file_gone = (
+                        poster and not poster.startswith("dthumb_")
+                        and not os.path.exists(
+                            os.path.join(config.POSTERS_DIR, poster)))
+                    if not poster or poster.startswith("dthumb_") or tmdb_file_gone:
                         await self._resolve_poster(rec)
                         new_poster = rec.get("poster")
                         if (poster.startswith("dthumb_") and new_poster
@@ -1203,7 +1435,7 @@ class Scanner:
                 # titles that already have a poster (they skip the pass above).
                 # enrich() answers from its cache, so this is cheap.
                 for rec in new_titles.values():
-                    if rec.get("section", "entertainment") != "entertainment":
+                    if sections.behavior_for(rec.get("section")) != "entertainment":
                         continue
                     if rec.get("category") is not None:
                         continue
@@ -1214,6 +1446,19 @@ class Scanner:
                     except Exception:  # pragma: no cover - defensive
                         continue
                     rec["category"] = sections.category_for(meta, rec["type"], hint)
+
+            # Self-heal: a structurally-detected show stuck at "other" (poisoned
+            # by an earlier drive rename that changed its id and dropped it back
+            # through TMDB's negative-lookup path) resets to "show", unless the
+            # drive explicitly overrides its category. Runs with TMDB off too so
+            # already-poisoned libraries recover; needs no TMDB call.
+            for rec in new_titles.values():
+                if sections.behavior_for(rec.get("section")) != "entertainment":
+                    continue
+                if rec.get("type") == "show" and rec.get("category") == "other":
+                    hint = ((drive_hints or {}).get(rec.get("drive_id")) or {}).get("category")
+                    if not hint:
+                        rec["category"] = "show"
 
             # Titles TMDB couldn't cover fall back to the video's own Drive
             # thumbnail (also the only poster source when TMDB is disabled).

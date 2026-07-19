@@ -8,6 +8,8 @@ import os
 import secrets
 import socket
 import subprocess
+import time
+import urllib.parse
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -39,6 +41,15 @@ class AppState:
 
     def __init__(self, cfg):
         self.cfg = cfg
+        # sections.py's tabs cache otherwise self-loads from
+        # config.load_config() on first touch (mirroring its plugins() lazy
+        # pattern) -- but this AppState's `cfg` is the actual source of
+        # truth (tests build one from scratch without ever touching disk;
+        # in prod it's the same dict load_config() just returned anyway).
+        # Sync the cache up front so /api/sections and /api/settings always
+        # reflect *this* cfg, never a stale or unrelated on-disk one.
+        from . import sections as sections_mod
+        sections_mod.set_tabs(cfg.get("tabs"))
         self.tokens = TokenManager(cfg["remote"])
         self.api = DriveAPI(self.tokens, self.tokens.list_drives)
         # Hold a power assertion while streams are active (clamshell sleep would
@@ -60,6 +71,7 @@ class AppState:
         self.setup_error = None  # populated by preflight if rclone is unusable
         self._refresh_task = None
         self._pending_scope = set()  # scopes requested while a scan was running
+        self.stream_activity = {}  # file_id -> epoch of last GET /stream request
 
     def start_refresh(self, scope=None):
         """Kick a background library scan, if idle.
@@ -97,11 +109,23 @@ class AppState:
         self.start_refresh(scope=pending)
 
     def maybe_autorefresh(self):
-        """On startup: rescan if configured to, or if we have drives but no cache."""
+        """On startup: rescan if configured to, or if we have drives but no cache.
+
+        Skipped entirely when every selected drive resolves to no live tab
+        (all assignments point at tabs that have since been deleted, or the
+        drives were never assigned at all): with zero tabs by default, a scan
+        in that state would classify nothing and stamp an empty library.json,
+        which looks identical to genuine data loss rather than "nothing to
+        scan yet" — better to leave the last-known-good cache alone.
+        """
         if self.setup_error:
             return
         drives = self.cfg.get("selected_drives") or []
         if not drives:
+            return
+        from . import sections as sections_mod
+        drive_sections = self.cfg.get("drive_sections") or {}
+        if all(sections_mod.section_for_drive(drive_sections, d) is None for d in drives):
             return
         if self.cfg.get("auto_refresh_on_startup") or self.library.is_empty():
             self.start_refresh()
@@ -125,6 +149,59 @@ class AppState:
         await self.streamer.aclose()
         await self.tmdb.aclose()
         await self.subtitles.aclose()
+
+
+def _playlist_entries(rec, start=None, shuffle=False, seed=0):
+    """Build the canonical ordered playlist entries for a title record.
+
+    Mirrors the Fire TV app's own queue-flattening exactly, so the m3u the
+    server emits and the queue the app builds locally agree episode-for-
+    episode: extras seasons are skipped, movies contribute their single
+    file, and `start`/`shuffle` slice/reorder identically on both sides.
+    """
+    entries = []
+    if rec.get("type") == "show":
+        show_title = rec.get("title")
+        for s in rec.get("seasons", []):
+            if s.get("extras"):
+                continue
+            season_num = s.get("season")
+            for ep in s.get("episodes", []):
+                file_id = ep.get("file_id")
+                if not file_id:
+                    continue
+                ep_num = ep.get("episode")
+                ep_title = ep.get("title") or ep.get("name") or file_id
+                if season_num is not None and ep_num is not None:
+                    label = "%s · S%02dE%02d · %s" % (show_title, season_num, ep_num, ep_title)
+                else:
+                    label = ep_title
+                entries.append({
+                    "file_id": file_id,
+                    "label": label,
+                    "duration_ms": ep.get("duration_ms"),
+                })
+    elif rec.get("type") == "movie":
+        file_id = rec.get("file_id")
+        if file_id:
+            entries.append({
+                "file_id": file_id,
+                "label": rec.get("title"),
+                "duration_ms": rec.get("duration_ms"),
+            })
+
+    if shuffle:
+        from .shuffle import seeded_shuffle
+        entries = seeded_shuffle(entries, seed)
+    # Slice to the start episode AFTER any shuffle, so an up-next relaunch that
+    # passes ?start=<next episode> resumes the shuffled order at that episode
+    # rather than replaying from the top. (App and server shuffle identically,
+    # so the sliced suffix matches the app's queue position.)
+    if start:
+        idx = next((i for i, e in enumerate(entries) if e["file_id"] == start), None)
+        if idx is not None:
+            entries = entries[idx:]
+    return entries
 
 
 def _drive_error_response(e):
@@ -282,6 +359,44 @@ def create_app(cfg=None):
             return JSONResponse({"error": "not_found"}, status_code=404)
         return rec
 
+    @app.get("/api/playlist/{title_id}.m3u")
+    async def api_playlist_m3u(title_id: str, request: Request,
+                               start: str = None, shuffle: int = 0, seed: int = 0):
+        """M3U playlist for a title, in the exact order the Fire TV app's own
+        queue would play it (see _playlist_entries). Declared BEFORE the JSON
+        twin below: starlette matches routes in declaration order and
+        `{title_id}` ([^/]+) would otherwise swallow the ".m3u" suffix."""
+        state = app.state.dc
+        rec = state.library.get(title_id)
+        if not rec:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        entries = _playlist_entries(rec, start, bool(shuffle), seed)
+        base = str(request.base_url).rstrip("/")
+        token = state.cfg.get("remote_token") or ""
+        suffix = ("?token=" + urllib.parse.quote(token)) if token else ""
+        lines = ["#EXTM3U", "#PLAYLIST:" + (rec.get("title") or title_id)]
+        for e in entries:
+            dur = e.get("duration_ms")
+            lines.append("#EXTINF:%d,%s" % (int(dur / 1000) if dur else -1, e["label"]))
+            lines.append("%s/stream/%s%s" % (base, e["file_id"], suffix))
+        return Response("\n".join(lines) + "\n", media_type="audio/x-mpegurl")
+
+    @app.get("/api/playlist/{title_id}")
+    async def api_playlist_json(title_id: str, request: Request,
+                                start: str = None, shuffle: int = 0, seed: int = 0):
+        """JSON twin of the m3u above (same order for identical params) — the
+        app fetches this to learn the exact queue it should build locally."""
+        state = app.state.dc
+        rec = state.library.get(title_id)
+        if not rec:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        entries = _playlist_entries(rec, start, bool(shuffle), seed)
+        return {
+            "title_id": title_id,
+            "items": [{"file_id": e["file_id"], "name": e["label"],
+                      "duration_ms": e.get("duration_ms")} for e in entries],
+        }
+
     @app.post("/api/refresh")
     async def api_refresh(request: Request):
         state = app.state.dc
@@ -332,19 +447,22 @@ def create_app(cfg=None):
 
     @app.get("/api/sections")
     async def api_sections():
-        """Section metadata for the UI: built-ins plus any custom private
-        section plugins (see sections.py)."""
+        """Tab + behavior metadata for the UI (see sections.py for the split):
+        `sections` is the user's actual nav bar (fully resolved, each entry
+        already carries which behavior powers it), `behaviors` is the
+        catalog a "create tab" picker offers ("behaves like...")."""
         from . import sections as sections_mod
-        return {"sections": sections_mod.meta_list()}
+        return {"sections": sections_mod.meta_list(), "behaviors": sections_mod.behaviors_meta()}
 
     @app.get("/api/settings")
     async def api_get_settings():
         state = app.state.dc
         from .player import detect_player
-        available = [k for k in ("mpv", "iina", "vlc") if detect_player(k)[0]]
+        available = [k for k in ("mpv", "iina", "vlc", "infuse") if detect_player(k)[0]]
         return {
             "selected_drives": state.cfg.get("selected_drives", []),
             "drive_sections": state.cfg.get("drive_sections", {}),
+            "tabs": state.cfg.get("tabs", []),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "subtitles": bool(state.cfg.get("subtitles", True)),
@@ -364,6 +482,66 @@ def create_app(cfg=None):
             if new_drives != (state.cfg.get("selected_drives") or []):
                 drives_changed = True
             state.cfg["selected_drives"] = new_drives
+        # Tabs MUST be processed before drive_sections below: the
+        # drive_sections `valid = sections_mod.all_sections()` check has to
+        # see tabs created in *this same request* (the settings UI creates a
+        # tab and assigns a drive to it in one save), and set_tabs() is what
+        # makes that happen — it swaps sections.py's in-process cache before
+        # all_sections() is next called.
+        if "tabs" in body:
+            from . import sections as sections_mod
+            raw_tabs = body.get("tabs")
+            if not isinstance(raw_tabs, list):
+                raw_tabs = []
+            old_by_key = {t.get("key"): t for t in (state.cfg.get("tabs") or [])
+                          if isinstance(t, dict)}
+            valid_behaviors = sections_mod.behaviors()
+            cleaned = sections_mod.validate_tabs(raw_tabs)
+            # validate_tabs() is lenient by design (existing garbage in
+            # config.json shouldn't crash Settings) — it just silently drops
+            # anything it can't repair. That's fine for an UNCHANGED round-trip
+            # of the current tab list, but an entry the client is actively
+            # CREATING or EDITING must not vanish silently — the user asked to
+            # add/change a tab and would get a 200 with nothing back. Only
+            # free-pass a genuine no-op round-trip (same key AND same
+            # label+behavior as the stored record); anything else (a create, or
+            # an edit — including one that turns an existing tab invalid) falls
+            # through to strict validation below so it 400s instead of dropping.
+            for entry in raw_tabs:
+                if not isinstance(entry, dict):
+                    continue
+                raw_key = str(entry.get("key") or "").strip().lower()
+                label = str(entry.get("label") or "").strip()
+                behavior = entry.get("behavior")
+                old = old_by_key.get(raw_key) if raw_key else None
+                if (old is not None
+                        and str(old.get("label") or "").strip() == label
+                        and old.get("behavior") == behavior):
+                    continue  # unchanged existing tab -- lenient round-trip
+                if not label or len(label) > 40:
+                    return JSONResponse(
+                        {"error": "bad_request",
+                         "message": "Tab label must be 1-40 characters"},
+                        status_code=400)
+                if behavior not in valid_behaviors:
+                    return JSONResponse(
+                        {"error": "bad_request",
+                         "message": "Unknown tab behavior: %r" % (behavior,)},
+                        status_code=400)
+                prospective_key = sections_mod._slugify(raw_key or label, "tab")
+                survived = any(
+                    t["key"] == prospective_key and t["label"] == label
+                    and t["behavior"] == behavior
+                    for t in cleaned
+                )
+                if not survived:
+                    return JSONResponse(
+                        {"error": "bad_request",
+                         "message": "Tab key %r collides with an existing tab"
+                                    % prospective_key},
+                        status_code=400)
+            state.cfg["tabs"] = cleaned
+            sections_mod.set_tabs(cleaned)
         # Section assignments: validate values, refresh just the drives whose
         # section changed (their content must be re-classified).
         section_changed = []
@@ -380,10 +558,16 @@ def create_app(cfg=None):
                             if isinstance(k, str) and v in valid
                             and k in selected_now}
             old_sections = state.cfg.get("drive_sections") or {}
+            # Compare RAW values (no "or entertainment" fallback — that
+            # fallback doesn't make sense once tabs are user-defined and
+            # zero-default). A drive whose assignment appears, changes, or
+            # disappears entirely (e.g. its tab was just deleted, above) is a
+            # change that needs a scoped refresh: a now-unassigned drive's
+            # records must disappear from the library, and a rescan of a
+            # tab-less drive is a no-op, which is exactly what we want.
             section_changed = [
                 d for d in selected_now
-                if (old_sections.get(d) or "entertainment")
-                != (new_sections.get(d) or "entertainment")
+                if old_sections.get(d) != new_sections.get(d)
             ]
             state.cfg["drive_sections"] = new_sections
         if "auto_refresh_on_startup" in body:
@@ -396,7 +580,7 @@ def create_app(cfg=None):
             state.cfg["keep_awake"] = bool(body.get("keep_awake"))
         if "player" in body:
             choice = str(body.get("player") or "auto")
-            if choice in ("auto", "mpv", "iina", "vlc"):
+            if choice in ("auto", "mpv", "iina", "vlc", "infuse"):
                 state.cfg["player"] = choice
         # Remote access: a change to the bind mode only takes effect on the next
         # launch, so flag restart_required when it flips. Enabling it mints a
@@ -409,6 +593,24 @@ def create_app(cfg=None):
             state.cfg["remote_access"] = new_remote
             if new_remote and not state.cfg.get("remote_token"):
                 state.cfg["remote_token"] = secrets.token_urlsafe(16)
+        # A tab deletion arrives as a tabs-only POST (the Settings delete
+        # button sends just the new tab list, no drive_sections). Reconcile any
+        # drive still pointing at a now-deleted tab: drop the dangling
+        # assignment and fold that drive into section_changed so it is rescanned
+        # and its orphaned records leave the library. When drive_sections IS in
+        # the body it was already filtered against all_sections() above, so this
+        # pass is a harmless no-op in that case.
+        if "tabs" in body:
+            from . import sections as sections_mod
+            valid = set(sections_mod.all_sections())
+            ds = state.cfg.get("drive_sections") or {}
+            orphaned = [d for d, v in ds.items() if v not in valid]
+            if orphaned:
+                state.cfg["drive_sections"] = {d: v for d, v in ds.items()
+                                               if v in valid}
+                for d in orphaned:
+                    if d not in section_changed:
+                        section_changed.append(d)
         config_mod.save_config(state.cfg)
         started = False
         if drives_changed:
@@ -419,6 +621,7 @@ def create_app(cfg=None):
             "ok": True,
             "selected_drives": state.cfg.get("selected_drives", []),
             "drive_sections": state.cfg.get("drive_sections", {}),
+            "tabs": state.cfg.get("tabs", []),
             "auto_refresh_on_startup": bool(state.cfg.get("auto_refresh_on_startup", False)),
             "autoplay_next": bool(state.cfg.get("autoplay_next", True)),
             "subtitles": bool(state.cfg.get("subtitles", True)),
@@ -436,7 +639,19 @@ def create_app(cfg=None):
                 return await state.streamer.head(file_id)
             except DriveAPIError as e:
                 return _drive_error_response(e)
+        state.stream_activity[file_id] = time.time()
+        if len(state.stream_activity) > 64:
+            del state.stream_activity[min(state.stream_activity, key=state.stream_activity.get)]
         return await state.streamer.stream(file_id, request)
+
+    @app.get("/api/stream/recent")
+    async def api_stream_recent():
+        """Recently-streamed file_ids, most-recent first — lets the app learn
+        which episode a next-episode/shuffle playlist actually landed on."""
+        state = app.state.dc
+        now = time.time()
+        items = sorted(state.stream_activity.items(), key=lambda kv: kv[1], reverse=True)[:25]
+        return {"now": now, "items": [{"file_id": fid, "ts": ts, "age": now - ts} for fid, ts in items]}
 
     # ---- keep-awake ("Are you still watching?") ----
     # Behind the normal auth middleware (no exemptions): the TV app will adopt
@@ -543,7 +758,7 @@ def create_app(cfg=None):
                 item["title_id"] = rec.get("id")
                 item["type"] = rec.get("type")
                 item["poster"] = rec.get("poster")
-                item["section"] = rec.get("section", "entertainment")
+                item["section"] = rec.get("section")
         return {"items": items}
 
     @app.delete("/api/continue/{file_id}")

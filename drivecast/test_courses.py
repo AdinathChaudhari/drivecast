@@ -1,7 +1,7 @@
 """Tests for the course-drive classifier (SECTIONS_DESIGN.md §6).
 
 All synthetic — no Drive API is ever contacted. Fixtures echo the real course
-drives named in the design (DataCamp, MasterClass, Chris Voss, ...).
+drives named in the design (DataCamp, MasterClass, Cora Vane, ...).
 """
 from drivecast import courses
 
@@ -81,7 +81,7 @@ def test_datacamp_nn_flat_lessons_under_python_subject_container():
 # --------------------------------------------- flat "N - Title" (MasterClass) --
 
 def test_masterclass_n_dash_title_flat():
-    node = cnode("Chris Hadfield Teaches Space Exploration", fid="mcF", videos=[
+    node = cnode("Cole Harwick Teaches Space Exploration", fid="mcF", videos=[
         cvid("v3", "3 - Rockets.mp4", parent="mcF"),
         cvid("v1", "1 - Introduction.mp4", parent="mcF"),
         cvid("v2", "2 - The Soyuz.mp4", parent="mcF"),
@@ -92,9 +92,9 @@ def test_masterclass_n_dash_title_flat():
 
 
 def test_chris_voss_numbering_gap_is_display_order_not_index():
-    # Chris Voss skips lesson 13; the gap is fine — episode numbers are 1..N
+    # Cora Vane skips lesson 13; the gap is fine — episode numbers are 1..N
     # display positions, never the parsed lesson number.
-    node = cnode("Chris Voss Teaches Negotiation", fid="cvF", videos=[
+    node = cnode("Cora Vane Teaches Negotiation", fid="cvF", videos=[
         cvid("a", "12) Bargaining.mp4", parent="cvF"),
         cvid("b", "14) Black Swans.mp4", parent="cvF"),
         cvid("c", "15) Summary.mp4", parent="cvF"),
@@ -150,9 +150,9 @@ def test_video_lectures_wrapper():
     lectures = cnode("Video Lectures", fid="vlF", videos=[
         cvid("v1", "01) Plot.mp4", parent="vlF"),
         cvid("v2", "02) Character.mp4", parent="vlF")])
-    author = cnode("James Patterson", fid="jpF", subfolders=[lectures])
+    author = cnode("Jane Prescott", fid="jpF", subfolders=[lectures])
     rec = only(classify([author]))
-    assert rec["title"] == "James Patterson"
+    assert rec["title"] == "Jane Prescott"
 
 
 def test_ethical_hacking_double_wrap():

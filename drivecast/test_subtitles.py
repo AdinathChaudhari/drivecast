@@ -13,14 +13,14 @@ def _f(fid, name):
 # ------------------------------------------------------- sibling matching -----
 
 def test_pick_exact_stem_match():
-    files = [_f("a", "Arrival.2016.1080p.srt"), _f("b", "other-release.srt")]
-    assert pick_sibling_sub("Arrival.2016.1080p.mkv", files)["id"] == "a"
+    files = [_f("a", "Skyharbor.2016.1080p.srt"), _f("b", "other-release.srt")]
+    assert pick_sibling_sub("Skyharbor.2016.1080p.mkv", files)["id"] == "a"
 
 
 def test_pick_prefers_english_marker_on_tie():
-    files = [_f("fr", "Arrival.2016.fr.srt"), _f("en", "Arrival.2016.en.srt")]
+    files = [_f("fr", "Skyharbor.2016.fr.srt"), _f("en", "Skyharbor.2016.en.srt")]
     # both share the stem prefix; the English marker wins
-    assert pick_sibling_sub("Arrival.2016.mkv", files)["id"] == "en"
+    assert pick_sibling_sub("Skyharbor.2016.mkv", files)["id"] == "en"
 
 
 def test_pick_matches_episode_marker():
@@ -40,8 +40,8 @@ def test_pick_none_when_ambiguous_without_signal():
 
 
 def test_pick_ignores_non_subs_and_junk():
-    files = [_f("j", "._Arrival.srt"), _f("v", "Arrival.mkv"), _f("t", "notes.txt")]
-    assert pick_sibling_sub("Arrival.mkv", files) is None
+    files = [_f("j", "._Skyharbor.srt"), _f("v", "Skyharbor.mkv"), _f("t", "notes.txt")]
+    assert pick_sibling_sub("Skyharbor.mkv", files) is None
 
 
 # ------------------------------------------------------- resolver flow --------
@@ -62,14 +62,14 @@ class _FakeAPI:
 
 
 def test_resolver_caches_drive_sibling(tmp_path):
-    api = _FakeAPI(files=[_f("subid", "Arrival.2016.en.srt")])
+    api = _FakeAPI(files=[_f("subid", "Skyharbor.2016.en.srt")])
     r = SubtitleResolver(api, subs_dir=str(tmp_path))
-    path = asyncio.run(r.resolve("vid1", "Arrival.2016.mkv", "drv", "folder"))
+    path = asyncio.run(r.resolve("vid1", "Skyharbor.2016.mkv", "drv", "folder"))
     assert path and path.endswith(".srt")
     assert open(path, "rb").read().startswith(b"1\n")
     assert api.browse_calls == [("drv", "folder", ("subs",))]
     # Second resolve: served from cache, no further Drive calls.
-    path2 = asyncio.run(r.resolve("vid1", "Arrival.2016.mkv", "drv", "folder"))
+    path2 = asyncio.run(r.resolve("vid1", "Skyharbor.2016.mkv", "drv", "folder"))
     assert path2 == path
     assert len(api.browse_calls) == 1
     assert r.cached("vid1") == path
@@ -117,7 +117,7 @@ def test_resolver_opensubtitles_fallback(tmp_path, monkeypatch):
 
     r = SubtitleResolver(api, opensubtitles_key="k123", subs_dir=str(tmp_path))
     r._client = _FakeHTTP()
-    path = asyncio.run(r.resolve("vid3", "Arrival.2016.1080p.mkv", "drv", "folder"))
+    path = asyncio.run(r.resolve("vid3", "Skyharbor.2016.1080p.mkv", "drv", "folder"))
     assert path and open(path, "rb").read() == b"WEBVTT-ish srt bytes"
     kinds = [c for c in r._client.calls]
     assert ("POST", "https://api.opensubtitles.com/api/v1/download") in kinds

@@ -341,8 +341,8 @@ classifies each folder **recursively**:
   episode number. Season-folder detection de-noises the folder name first
   (dropping bracketed groups and quality tokens) and reads a *leading* `S<number>`,
   so gnarly real-world names like `S01 (2017) 1080p 10bit HEVC NF WEBRip x265
-  [ENGLISH - SPANISH]` and `S05 Part 1 (2021) …` still resolve to seasons 1 and 5
-  (this is why *Money Heist* comes through as one show, seasons 1–5). The short
+  [ENGLISH - SPANISH]` and `S05 Part 1 (2021) …` still resolve to seasons 1 and 5,
+  so a five-season show ripped that way still comes through as one tile. The short
   form is anchored to the start, so a title merely containing an S-number
   mid-string is never mistaken for a season.
 - Otherwise the folder **expands into movies**, recursing down the tree so each
@@ -350,11 +350,11 @@ classifies each folder **recursively**:
   - A **leaf movie folder** with one main video becomes one movie titled from the
     *folder* name; with several main videos, one movie per video, titled from each
     *file* name.
-  - A **container** (a collection like `Phase 1`, `Hollywood`, `Blade Series`,
-    `The Godfather Series`, holding movie subfolders and/or loose movie files,
+  - A **container** (a collection like `Phase 1`, `Classics`, `Trilogy Box`,
+    `Saga Collection`, holding movie subfolders and/or loose movie files,
     possibly nested) recurses into each subfolder and turns any stray loose video
-    into its own tile — so a `Phase 1` folder yields *Iron Man*, *The Incredible
-    Hulk*, *Thor*, … rather than one bogus `Phase 1` tile.
+    into its own tile — so a `Phase 1` folder yields each film inside it
+    rather than one bogus `Phase 1` tile.
   - **Bonus-material subfolders** (`Featurettes`, `Extras`, `Bonus`, `Behind the
     Scenes`, `Deleted Scenes`, `Trailers`, `Special Features`, `Making Of`, …)
     become the movie's **`extras`** — labelled groups of bonus clips carried on
@@ -363,7 +363,8 @@ classifies each folder **recursively**:
     folder fans out onto every film it contains. Only **discard** folders
     (`Sample(s)`, `Subs`, `Subtitles`) hold no library content and are dropped. A
     leading **enumeration prefix** (`01) `, `01.`, `1 - `) is stripped from titles
-    (without touching real leading numbers like *2 Fast 2 Furious* or *1917*).
+    (without touching a title that legitimately *starts* with a number — a digit
+    followed by a plain space, or an all-digit name, is left alone).
 - Loose videos sitting at a drive's root are parsed by filename: `SxxExx` files
   group into a show; everything else is a standalone movie.
 
@@ -373,16 +374,24 @@ same film never collides with another tile.
 **Grouping seasons into one show.** Real drives store seasons in wildly different
 ways, so after the first pass drivecast merges them so each show is a single tile:
 
-- `The Office/Season 1/…` — seasons nested under a show folder (already one show).
-- `Blackadder Season 1 S01`, `Blackadder Season 2 S02`, … — separate top-level
-  folders sharing a name prefix are grouped under that prefix (`Blackadder`).
+- `The Branch/Season 1/…` — seasons nested under a show folder (already one show).
+- `Grimwold Season 1 S01`, `Grimwold Season 2 S02`, … — separate top-level
+  folders sharing a name prefix are grouped under that prefix (`Grimwold`).
 - `Season 1`, `Season 2`, … as bare folders — the **whole drive** is the show, so
-  they're grouped under the drive's name (`Fraiser`).
+  they're grouped under the drive's name.
 - A show split across `… (Part 1)` / `(Part 2)` drives merges into one show.
+- A sibling bonus folder (`Featurettes/Season N/…` beside the season folders, or
+  inside a `<Show> Season N` folder) attaches to the merged show as
+  `Featurettes · Season N` pseudo-seasons — marked `extras: true` so the UI
+  lists them in the season picker without counting them as real seasons or
+  pulling them into Shuffle. If a drive has no single owning show, the extras
+  folder keeps its own tile instead of guessing the wrong owner.
 
 Quality noise in folder names (`Season 1 (480p DVD)`,
-`Blackadder (1983) S01 (576p x265 …)`) is stripped before detection, and a
+`Grimwold (1983) S01 (576p x265 …)`) is stripped before detection, and a
 whole-series wrapper named as a range (`Season 1-9 S01-s09`) is left as-is.
+
+(Show names in examples throughout are invented.)
 
 The result is written to **`data/library.json`** (atomically) as structured
 records — title, year, type, a parsed **quality** label, an **`added_at`**

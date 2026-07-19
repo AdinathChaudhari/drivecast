@@ -23,32 +23,32 @@ SYNTHETIC = {
     "generated_at": 123.0,
     "titles": {
         "movieA": {
-            "id": "movieA", "type": "movie", "title": "Arrival", "year": 2016,
+            "id": "movieA", "type": "movie", "title": "Skyharbor", "year": 2016,
             "drive_id": "drv1", "folder_id": "movieA", "poster": None,
             "tmdb_id": None, "overview": "aliens", "quality": "4K",
             "file_id": "fileA", "size": 5000, "duration_ms": 7200000,
         },
         "showB": {
-            "id": "showB", "type": "show", "title": "The Bear", "year": 2022,
+            "id": "showB", "type": "show", "title": "The Ladle", "year": 2022,
             "drive_id": "drv1", "folder_id": "showB", "poster": "bear.jpg",
             "tmdb_id": None, "overview": "kitchen",
             "seasons": [
                 {"season": 1, "episodes": [
                     {"title": "System", "episode": 1, "file_id": "fileE1",
-                     "name": "The.Bear.S01E01.mkv", "duration_ms": 1500000,
+                     "name": "The.Ladle.S01E01.mkv", "duration_ms": 1500000,
                      "size": 900, "parent_id": "s1"},
                     {"title": "Hands", "episode": 2, "file_id": "fileE2",
-                     "name": "The.Bear.S01E02.mkv", "duration_ms": 1400000,
+                     "name": "The.Ladle.S01E02.mkv", "duration_ms": 1400000,
                      "size": 850, "parent_id": "s1"},
                 ]},
                 {"season": 2, "episodes": [
                     {"title": "Emergency", "episode": 1, "file_id": "fileE3",
-                     "name": "The.Bear.S02E01.mkv", "duration_ms": 1600000,
+                     "name": "The.Ladle.S02E01.mkv", "duration_ms": 1600000,
                      "size": 950, "parent_id": "s2"},
                 ]},
                 {"season": 0, "name": "Extras", "extras": True, "episodes": [
                     {"title": "Behind the Scenes", "episode": 1, "file_id": "fileX1",
-                     "name": "Bear.Extras.mkv", "duration_ms": 300000,
+                     "name": "Ladle.Extras.mkv", "duration_ms": 300000,
                      "size": 200, "parent_id": "sx"},
                 ]},
             ],
@@ -150,17 +150,17 @@ def test_library_endpoint_serves_cache(client):
     assert r.status_code == 200
     data = r.json()
     titles = {t["title"] for t in data["titles"]}
-    assert titles == {"Arrival", "The Bear"}
+    assert titles == {"Skyharbor", "The Ladle"}
     assert data["selected_drives"] == ["drv1"]
     assert data["scanning"] is False
     # Quality field is serialized straight through from the record.
-    arrival = next(t for t in data["titles"] if t["title"] == "Arrival")
-    assert arrival["quality"] == "4K"
+    skyharbor = next(t for t in data["titles"] if t["title"] == "Skyharbor")
+    assert skyharbor["quality"] == "4K"
 
 
 def test_watched_map_endpoint(client):
     # Record a play position, then the watched-map exposes its last_played.
-    client.post("/api/play", json={"file_id": "fileA", "name": "Arrival"})
+    client.post("/api/play", json={"file_id": "fileA", "name": "Skyharbor"})
     client.app.state.dc.history.update("fileA", position=120.0, duration=7200.0, force=True)
     r = client.get("/api/watched-map")
     assert r.status_code == 200
@@ -225,7 +225,7 @@ def test_settings_post_toggle_auto_refresh(client):
 def test_play_uses_cached_duration_no_drive_call(client):
     # POST with only a file_id: duration must come from the cached library,
     # and no Drive metadata call may happen (DriveAPI._get raises if it does).
-    r = client.post("/api/play", json={"file_id": "fileA", "name": "Arrival"})
+    r = client.post("/api/play", json={"file_id": "fileA", "name": "Skyharbor"})
     assert r.status_code == 200
     assert r.json()["player"] == "mpv"
     assert client._captured["duration_ms"] == 7200000  # from the cache
@@ -279,7 +279,7 @@ def test_settings_roundtrips_autoplay_next(client):
 def test_continue_enriched_with_library_title(client):
     # A partially-watched episode surfaces on the Continue shelf carrying the
     # owning show's title/poster so the UI can render a thumbnail.
-    client.app.state.dc.history.update("fileE1", name="The.Bear.S01E01.mkv",
+    client.app.state.dc.history.update("fileE1", name="The.Ladle.S01E01.mkv",
                                        position=600.0, duration=1500.0, force=True)
     r = client.get("/api/continue")
     assert r.status_code == 200
@@ -287,7 +287,7 @@ def test_continue_enriched_with_library_title(client):
     assert len(items) == 1
     it = items[0]
     assert it["file_id"] == "fileE1"
-    assert it["title"] == "The Bear"
+    assert it["title"] == "The Ladle"
     assert it["title_id"] == "showB"
     assert it["type"] == "show"
     assert it["poster"] == "bear.jpg"
@@ -305,7 +305,7 @@ def test_continue_unknown_file_passes_through(client):
 
 def test_history_remove_drops_entry_and_persists(tmp_path):
     hist = history_mod.History(path=str(tmp_path / "history.json"))
-    hist.update("fileA", name="Arrival", position=100.0, duration=1000.0, force=True)
+    hist.update("fileA", name="Skyharbor", position=100.0, duration=1000.0, force=True)
     assert hist.get("fileA") is not None
     # Removing an existing entry returns True and rewrites the file without it.
     assert hist.remove("fileA") is True
@@ -318,7 +318,7 @@ def test_history_remove_drops_entry_and_persists(tmp_path):
 
 def test_continue_remove_endpoint_deletes_entry(client):
     hist = client.app.state.dc.history
-    hist.update("fileE1", name="The.Bear.S01E01.mkv",
+    hist.update("fileE1", name="The.Ladle.S01E01.mkv",
                 position=600.0, duration=1500.0, force=True)
     assert any(it["file_id"] == "fileE1"
                for it in client.get("/api/continue").json()["items"])
@@ -424,7 +424,7 @@ def test_play_resolves_and_passes_subtitle(client, tmp_path):
         return str(tmp_path / "subs" / ("%s.srt" % file_id))
 
     client.app.state.dc.subtitles.resolve = _fake_resolve
-    r = client.post("/api/play", json={"file_id": "fileA", "name": "Arrival"})
+    r = client.post("/api/play", json={"file_id": "fileA", "name": "Skyharbor"})
     assert r.status_code == 200
     assert r.json()["subtitles"] is True
     assert client._captured["sub_path"].endswith("fileA.srt")
@@ -439,7 +439,7 @@ def test_play_subtitles_toggle_off(client):
 
     client.app.state.dc.subtitles.resolve = _spy_resolve
     client.post("/api/settings", json={"subtitles": False})
-    r = client.post("/api/play", json={"file_id": "fileA", "name": "Arrival"})
+    r = client.post("/api/play", json={"file_id": "fileA", "name": "Skyharbor"})
     assert r.status_code == 200
     assert r.json()["subtitles"] is False
     assert calls == []                     # resolver never consulted
@@ -525,7 +525,7 @@ def test_progress_updates_history_and_ended_forces_write(client):
     hist = client.app.state.dc.history
     # First report persists (the initial write is never debounced) and history
     # computes percent from position/duration.
-    r = client.post("/api/progress", json={"file_id": "fileA", "name": "Arrival",
+    r = client.post("/api/progress", json={"file_id": "fileA", "name": "Skyharbor",
                                             "position": 100.0, "duration": 1000.0})
     assert r.status_code == 200 and r.json() == {"ok": True}
     assert _disk(client)["fileA"]["percent"] == 10.0
@@ -541,7 +541,7 @@ def test_progress_updates_history_and_ended_forces_write(client):
 
 
 def test_progress_ended_marks_watched(client):
-    client.post("/api/progress", json={"file_id": "fileA", "name": "Arrival",
+    client.post("/api/progress", json={"file_id": "fileA", "name": "Skyharbor",
                                         "position": 950.0, "duration": 1000.0,
                                         "ended": True})
     assert client.app.state.dc.history.get("fileA")["watched"] is True
@@ -602,7 +602,7 @@ def test_play_rejected_for_remote_client(make_client):
     with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
         # Authorized by the query token, but playback still refuses a non-local
         # client — a phone must never launch mpv on the Mac.
-        r = c.post("/api/play?token=sekret", json={"file_id": "fileA", "name": "Arrival"})
+        r = c.post("/api/play?token=sekret", json={"file_id": "fileA", "name": "Skyharbor"})
         assert r.status_code == 403
         assert r.json()["error"] == "local_only"
 

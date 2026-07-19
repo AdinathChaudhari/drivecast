@@ -60,7 +60,7 @@ its previous titles instead of vanishing. The raw folder-browser is still
 available behind a demoted **Browse files** link.
 
 **Collection folders.** The scan recurses *into* folder trees, so a collection
-folder (`Phase 1`, `Hollywood`, `Blade Series`, `The Godfather Series`, …) that
+folder (`Phase 1`, `Classics`, `Trilogy Box`, `Saga Collection`, …) that
 holds many films — as loose files or one-movie subfolders, possibly nested —
 surfaces **each film as its own tile** rather than one wrong tile named after the
 folder. Bonus-material subfolders (`Featurettes`, `Extras`, `Behind the Scenes`,
@@ -70,12 +70,23 @@ below the Play button, just like a show's featurette pseudo-seasons (a collectio
 (`01) `, `01.`, `1 - `) is stripped from titles. TV shows (season subfolders or
 episode-marked files) are still detected and kept as a single show tile.
 
+**Featurettes & extras stay inside their show.** Bonus-material folders
+(`Featurettes`, `Extras`, `Bonus`, `Behind the Scenes`, `Deleted Scenes`,
+`Trailers`) never become their own tile. Wherever one sits — inside a show
+folder, beside bare `Season N` folders at a drive root, or inside a
+`<Show> Season N` folder — its videos fold into that show as labelled
+pseudo-seasons listed at the end of the season picker (`Featurettes`,
+`Featurettes · Season 2`, …). They play like episodes but stay out of the
+season count and Shuffle. Junk folders (`Sample(s)`, `Subs`, `Subtitles`) are
+dropped outright. One guard: a root extras folder on a drive with no single
+owning show keeps its own tile rather than guessing the wrong owner.
+
 **Robust season detection.** Season subfolders survive messy release naming.
 Beyond `Season 1` / `S01`, drivecast de-noises a folder name (dropping bracketed
 groups and quality tokens) and reads a *leading* `S<number>`, so real-world
 folders like `S01 (2017) 1080p 10bit HEVC NF WEBRip x265 [ENGLISH - SPANISH]`
-and `S05 Part 1 (2021) …` group correctly (e.g. Money Heist → one show,
-seasons 1–5). The short form is anchored to the start, so a title that merely
+and `S05 Part 1 (2021) …` group correctly (a five-season show ripped that way
+still lands as one tile). The short form is anchored to the start, so a title that merely
 contains an S-number mid-string is never mistaken for a season.
 
 **Quality pills.** Each tile shows a small pill with the video quality parsed

@@ -194,6 +194,138 @@ function qualityPill(rec) {
   return rec.quality ? `<span class="pill">${escapeHTML(rec.quality)}</span>` : "";
 }
 
+// ---------- "Fix poster" picker ----------
+// Only entertainment movies/shows draw posters from TMDB, so the affordance is
+// scoped to that behavior; courses/podcasts use their own artwork.
+function canFixPoster(rec) {
+  const behavior = (SECTION_META[sectionOf(rec)] || {}).behavior;
+  return behavior === "entertainment" && (rec.type === "movie" || rec.type === "show");
+}
+
+function fixPosterBtn(rec) {
+  if (!canFixPoster(rec)) return "";
+  return `<button class="fixposter" title="Fix poster" aria-label="Fix poster">🖼️</button>`;
+}
+
+function mediaTypeOf(rec) { return rec.type === "show" ? "tv" : "movie"; }
+
+// Mirror of tmdb._norm_title so client-side record matching lines up with the
+// server's override keying.
+function normTitle(s) {
+  return String(s == null ? "" : s).toLowerCase()
+    .replace(/[^\w\s]/g, " ").split(/\s+/).filter(Boolean).join(" ");
+}
+
+let posterPickerState = null;  // { rec, posterEl } while the modal is open
+
+function openPosterPicker(rec, posterEl) {
+  posterPickerState = { rec, posterEl };
+  $("posterModalTitle").textContent = `Fix poster — ${rec.title}`;
+  const grid = $("posterCandidates");
+  grid.innerHTML = `<div class="spinner">Searching…</div>`;
+  show($("posterModal"), true);
+  $("posterModalClose").focus();
+  loadPosterCandidates(rec);
+}
+
+function closePosterPicker() {
+  show($("posterModal"), false);
+  posterPickerState = null;
+}
+
+async function loadPosterCandidates(rec) {
+  const grid = $("posterCandidates");
+  let data;
+  try {
+    data = await api(`/api/poster-candidates?title=${encodeURIComponent(rec.title)}` +
+      `&type=${encodeURIComponent(mediaTypeOf(rec))}`);
+  } catch (e) {
+    grid.innerHTML = `<p class="muted">Couldn't load candidates: ${escapeHTML(e.message)}</p>`;
+    return;
+  }
+  const cands = (data && data.candidates) || [];
+  if (!cands.length) {
+    grid.innerHTML = `<p class="muted">No matches found on TMDB.</p>`;
+    return;
+  }
+  grid.innerHTML = "";
+  cands.forEach((c) => grid.appendChild(candidateCard(rec, c)));
+}
+
+function candidateCard(rec, c) {
+  const card = document.createElement("div");
+  card.className = "candidate";
+  const poster = c.poster_key
+    ? `<img loading="lazy" src="/api/poster/${encodeURIComponent(c.poster_key)}" alt=""
+         onerror="this.parentElement.classList.add('placeholder');this.remove()">`
+    : "";
+  const yr = c.year ? ` (${escapeHTML(c.year)})` : "";
+  card.innerHTML = `
+    <div class="candidate-poster poster${c.poster_key ? "" : " placeholder"}">${poster}</div>
+    <div class="candidate-title">${escapeHTML(c.title)}${yr}</div>
+    <div class="candidate-overview">${escapeHTML((c.overview || "").slice(0, 160))}</div>
+    <button class="btn primary candidate-use" type="button">Use this</button>`;
+  card.querySelector(".candidate-use").addEventListener(
+    "click", () => applyPosterOverride(rec, c, card));
+  return card;
+}
+
+async function applyPosterOverride(rec, cand, card) {
+  const btn = card.querySelector(".candidate-use");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  let res;
+  try {
+    res = await api("/api/poster-override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: rec.title, type: mediaTypeOf(rec),
+                             tmdb_id: cand.tmdb_id }),
+    });
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = "Use this";
+    toast(`Couldn't apply poster: ${e.message}`, "error");
+    return;
+  }
+  applyPosterToRecords(rec, res.poster_key, res.title, res.year);
+  updatePosterElement(posterPickerState && posterPickerState.posterEl, res.poster_key);
+  closePosterPicker();
+  toast("Poster updated.", "ok");
+}
+
+// Update every loaded record that shares this title + media type, so the fix
+// sticks across re-renders (the server already did this for its own records).
+function applyPosterToRecords(rec, posterKey, newTitle, newYear) {
+  const want = normTitle(rec.title);
+  const wantType = rec.type;
+  for (const r of state.library) {
+    if (r.type === wantType && normTitle(r.title) === want) {
+      if (posterKey) r.poster = posterKey;
+      if (newYear && !r.year) r.year = newYear;
+    }
+  }
+}
+
+// Swap the tile/detail poster image to the new artwork (cache-busted), or
+// replace a placeholder with a fresh <img>.
+function updatePosterElement(posterEl, posterKey) {
+  if (!posterEl || !posterKey) return;
+  const src = `/api/poster/${encodeURIComponent(posterKey)}?v=${Date.now()}`;
+  const img = posterEl.querySelector("img");
+  if (img) {
+    img.src = src;
+  } else {
+    posterEl.classList.remove("placeholder");
+    posterEl.querySelectorAll(".ph-title, .ph-year").forEach((n) => n.remove());
+    const el = document.createElement("img");
+    el.loading = "lazy";
+    el.src = src;
+    el.alt = "";
+    posterEl.appendChild(el);
+  }
+}
+
 // ---------- library tiles ----------
 function countEpisodes(rec) {
   let n = 0;
@@ -272,10 +404,15 @@ function titleCard(rec) {
       : (rec.year || "");
   }
   card.innerHTML = `
-    <div class="poster${p.cls}">${badge}${pill}${p.html}</div>
+    <div class="poster${p.cls}">${badge}${pill}${fixPosterBtn(rec)}${p.html}</div>
     <div class="label">${escapeHTML(rec.title)}</div>
     <div class="sub">${escapeHTML(String(sub))}</div>`;
   card.addEventListener("click", () => { location.hash = "#/title/" + encodeURIComponent(rec.id); });
+  const fix = card.querySelector(".fixposter");
+  if (fix) fix.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openPosterPicker(rec, card.querySelector(".poster"));
+  });
   return card;
 }
 
@@ -607,6 +744,11 @@ async function openDetail(id) {
   await ensureWatchedMap();
   if (rec.type === "show") renderShowDetail(rec);
   else renderMovieDetail(rec);
+  const fix = body.querySelector(".detail-poster .fixposter");
+  if (fix) fix.addEventListener("click", (e) => {
+    e.stopPropagation();
+    openPosterPicker(rec, body.querySelector(".detail-poster"));
+  });
 }
 
 // Season/episode nouns for a record's section ("Module"/"Lesson", ...).
@@ -632,7 +774,7 @@ function detailHeader(rec) {
     ? qualityPill(rec) : mediaPill(rec);
   return `
     <div class="detail-hero">
-      <div class="detail-poster poster${p.cls}">${pill}${p.html}</div>
+      <div class="detail-poster poster${p.cls}">${pill}${fixPosterBtn(rec)}${p.html}</div>
       <div class="detail-meta">
         <h1>${escapeHTML(rec.title)}</h1>
         <div class="detail-sub">${escapeHTML(subBits.join(" · "))}</div>
@@ -1323,6 +1465,15 @@ $("btnStartOver").addEventListener("click", async () => {
   if (pendingPlay) await launch(pendingPlay.fileId, pendingPlay.name, pendingPlay.durMs, pendingPlay.driveId, pendingPlay.parentId, true, pendingPlay.queue, pendingPlay.media, pendingPlay.resumeAt);
 });
 $("btnCancel").addEventListener("click", () => { show($("modal"), false); pendingPlay = null; });
+
+// Fix-poster picker: close via the ✕, a backdrop click, or Esc.
+if ($("posterModalClose")) $("posterModalClose").addEventListener("click", closePosterPicker);
+if ($("posterModal")) $("posterModal").addEventListener("click", (e) => {
+  if (e.target === $("posterModal")) closePosterPicker();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && posterPickerState) closePosterPicker();
+});
 
 // ==================== Web player (iPhone / iPad) ====================
 // Fullscreen inline <video> for remote devices. Reports position back to

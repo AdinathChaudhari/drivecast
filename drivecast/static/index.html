@@ -261,6 +261,16 @@
     </div>
   </div>
 
+  <!-- "Fix poster" picker — choose the correct TMDB artwork for a title -->
+  <div id="posterModal" class="modal hidden">
+    <div class="modal-card poster-picker">
+      <button id="posterModalClose" class="wp-close" aria-label="Close">✕</button>
+      <h3 id="posterModalTitle">Fix poster</h3>
+      <p class="muted">Pick the correct match. Your choice is saved and shows everywhere.</p>
+      <div id="posterCandidates" class="poster-candidates"></div>
+    </div>
+  </div>
+
   <!-- "Are you still watching?" — keep-awake prompt before the Mac sleeps -->
   <div id="awakeModal" class="modal hidden">
     <div class="modal-card">

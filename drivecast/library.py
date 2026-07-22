@@ -493,8 +493,12 @@ def classify_loose(drive_id, loose_files):
 # ------------------------------------------------------------- season grouping --
 
 # Drive-name noise to strip when a whole drive is one show (e.g. "TV | Grimwold",
-# "Movie // Saga", "Milo in the Muddle (Part 1)").
-_DRIVE_PREFIX_RE = re.compile(r"^\s*(?:tv|movie|movies|show|shows)\s*[|/:\-]+\s*", re.IGNORECASE)
+# "Movie // Saga", "TV Show // Grimwold", "Milo in the Muddle (Part 1)").
+# The optional trailing "show(s)" handles the two-word "TV Show //" / "Movie Show //"
+# convention. A separator MUST follow, so a plain drive literally named "TV Shows"
+# (no separator) is left intact rather than stripped to "".
+_DRIVE_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:tv|movies?)(?:\s+shows?)?|shows?)\s*[|/:\-]+\s*", re.IGNORECASE)
 _PART_SUFFIX_RE = re.compile(r"\s*[\(\[]?\s*part\s*\d+\s*[\)\]]?\s*$", re.IGNORECASE)
 
 
@@ -1011,6 +1015,33 @@ class Library:
             self._rebuild_index()
             self._save()
 
+    def apply_poster_override(self, title, media_type, meta):
+        """Apply a hand-picked TMDB match (from the "Fix poster" picker) to every
+        in-memory record whose normalized title matches, so the corrected poster
+        shows without a full rescan. Persists atomically. Returns how many
+        records were updated (0 if the title isn't in the current library).
+        """
+        from . import tmdb
+        want = tmdb._norm_title(title)
+        want_type = "show" if media_type == "tv" else "movie"
+        n = 0
+        with self._lock:
+            for rec in self.data["titles"].values():
+                if rec.get("type") != want_type:
+                    continue
+                if tmdb._norm_title(rec.get("title")) != want:
+                    continue
+                # Only overwrite the image when the pick actually has artwork, so
+                # a match without a poster doesn't wipe an existing one.
+                if meta.get("poster_key"):
+                    rec["poster"] = meta["poster_key"]
+                rec["tmdb_id"] = meta.get("tmdb_id")
+                rec["overview"] = meta.get("overview")
+                n += 1
+            if n:
+                self._save()
+        return n
+
     def seed_api_cache(self, api):
         """Prime the DriveAPI metadata cache so playback needs no Drive call."""
         with self._lock:
@@ -1218,6 +1249,12 @@ class Scanner:
             rec["poster"] = meta.get("poster_key")
         rec["tmdb_id"] = meta.get("tmdb_id")
         rec["overview"] = meta.get("overview")
+        # Adopt TMDB's canonical title for display. _lookup only returns a match
+        # that cleared the similarity threshold, so this is the authoritative
+        # name — and it sheds any distributor/release junk the parser left on
+        # ("Golden Hour Criterion" -> "Golden Hour") without a hardcoded list.
+        if meta.get("title"):
+            rec["title"] = meta["title"]
         if meta.get("year") and not rec.get("year"):
             try:
                 rec["year"] = int(str(meta["year"])[:4])

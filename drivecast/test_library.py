@@ -326,6 +326,21 @@ def test_movie_record_quality_falls_back_to_folder_name():
     assert rec["quality"] == "1080p"
 
 
+def test_clean_show_name_strips_two_word_tv_show_prefix():
+    # "TV Show // <name>" is the drive convention; the two-word prefix must be
+    # stripped so the tile title isn't literally "TV Show // Grimwold".
+    assert library._clean_show_name("TV Show // Grimwold") == "Grimwold"
+    assert library._clean_show_name(
+        "TV Show // Grimwold; Ashvale; Thornwood") == "Grimwold; Ashvale; Thornwood"
+    assert library._clean_show_name(
+        "TV Show // The '90s Kids (Part 1)") == "The '90s Kids"
+    # Single-token prefixes still strip.
+    assert library._clean_show_name("Movie // The Feature") == "The Feature"
+    assert library._clean_show_name("TV | Grimwold") == "Grimwold"
+    # A plain drive named "TV Shows" (no separator) must NOT collapse to "".
+    assert library._clean_show_name("TV Shows") == "TV Shows"
+
+
 def test_show_record_uses_best_episode_quality():
     s1 = node("Season 1", [
         vid("e1", "Show.S01E01.720p.mkv", ancestors=["Show", "Season 1"]),

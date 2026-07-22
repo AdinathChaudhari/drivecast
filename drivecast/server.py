@@ -864,6 +864,41 @@ def create_app(cfg=None):
                 pass
         return JSONResponse({"error": "not_found"}, status_code=404)
 
+    @app.get("/api/poster-candidates")
+    async def api_poster_candidates(title: str, type: str = "movie"):
+        """Candidate TMDB matches for the "Fix poster" picker. Each candidate's
+        poster is pre-downloaded, so the UI shows thumbnails via /api/poster."""
+        state = app.state.dc
+        media = "tv" if type == "tv" else "movie"
+        candidates = await state.tmdb.search_candidates(title, media)
+        return {"candidates": candidates}
+
+    @app.post("/api/poster-override")
+    async def api_poster_override(request: Request):
+        """Save a hand-picked poster for a title and apply it live.
+
+        Persists the pick to the override store (consulted first on future
+        enrich() calls, so it survives rescans) AND updates the matching
+        in-memory library record(s) so both the web UI and the Fire TV app see
+        the corrected poster without a full rescan.
+        """
+        state = app.state.dc
+        body = await request.json()
+        title = (body.get("title") or "").strip()
+        media = "tv" if body.get("type") == "tv" else "movie"
+        tmdb_id = body.get("tmdb_id")
+        if not title or tmdb_id in (None, ""):
+            return JSONResponse({"error": "bad_request"}, status_code=400)
+        if not state.tmdb.enabled:
+            return JSONResponse({"error": "tmdb_disabled"}, status_code=400)
+        meta = await state.tmdb.by_id(tmdb_id, media)
+        if not meta:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        state.tmdb.set_override(title, media, meta)
+        updated = state.library.apply_poster_override(title, media, meta)
+        return {"poster_key": meta.get("poster_key"), "title": meta.get("title"),
+                "year": meta.get("year"), "updated": updated}
+
     # ---- remote access endpoints ----
 
     @app.get("/api/remote")

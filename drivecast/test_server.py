@@ -1065,3 +1065,85 @@ def test_stream_recent_records_gets(client, monkeypatch):
 def test_stream_recent_requires_token_for_remote(make_client):
     with make_client({"remote_access": True, "remote_token": "sekret"}) as c:
         assert c.get("/api/stream/recent").status_code == 401
+
+
+# ---- "Fix poster" picker endpoints ----
+
+def test_poster_candidates_disabled_returns_empty(client):
+    """With no TMDB key the picker still answers cleanly (empty list)."""
+    r = client.get("/api/poster-candidates?title=Skyharbor&type=movie")
+    assert r.status_code == 200
+    assert r.json()["candidates"] == []
+
+
+def test_poster_candidates_and_override(client, monkeypatch):
+    """Candidate search returns the stubbed matches; an override persists to the
+    store AND updates the matching in-memory library record live."""
+    dc = client.app.state.dc
+    dc.tmdb.enabled = True
+
+    async def fake_candidates(title, media_type="movie", limit=6):
+        return [{"tmdb_id": 55, "title": "Skyharbor", "year": "2016",
+                 "poster_key": "arr.jpg", "overview": "aliens"}]
+
+    async def fake_by_id(tmdb_id, media_type="movie"):
+        return {"tmdb_id": tmdb_id, "title": "Skyharbor", "year": "2016",
+                "poster_key": "arr55.jpg", "overview": "aliens", "genre_ids": [878]}
+
+    saved = {}
+
+    def fake_set_override(title, media_type, meta):
+        saved.update(title=title, media_type=media_type, meta=meta)
+
+    monkeypatch.setattr(dc.tmdb, "search_candidates", fake_candidates)
+    monkeypatch.setattr(dc.tmdb, "by_id", fake_by_id)
+    monkeypatch.setattr(dc.tmdb, "set_override", fake_set_override)
+
+    r = client.get("/api/poster-candidates?title=Skyharbor&type=movie")
+    assert r.status_code == 200
+    assert r.json()["candidates"][0]["tmdb_id"] == 55
+
+    r = client.post("/api/poster-override",
+                    json={"title": "Skyharbor", "type": "movie", "tmdb_id": 55})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["poster_key"] == "arr55.jpg"
+    assert body["updated"] == 1
+
+    # Persisted to the override store, keyed by title + media type.
+    assert saved["meta"]["poster_key"] == "arr55.jpg"
+    assert saved["title"] == "Skyharbor" and saved["media_type"] == "movie"
+
+    # The in-memory record reflects the pick without a rescan (Fire TV + web).
+    rec = dc.library.get("movieA")
+    assert rec["poster"] == "arr55.jpg"
+    assert rec["tmdb_id"] == 55
+
+
+def test_poster_override_bad_request(client):
+    """Missing title or id is a 400 before any TMDB work."""
+    r = client.post("/api/poster-override", json={"type": "movie", "tmdb_id": 5})
+    assert r.status_code == 400
+    r = client.post("/api/poster-override", json={"title": "Skyharbor", "type": "movie"})
+    assert r.status_code == 400
+
+
+def test_poster_override_tmdb_disabled(client):
+    r = client.post("/api/poster-override",
+                    json={"title": "Skyharbor", "type": "movie", "tmdb_id": 5})
+    assert r.status_code == 400
+    assert r.json()["error"] == "tmdb_disabled"
+
+
+def test_poster_override_invalid_id(client, monkeypatch):
+    """An id TMDB can't resolve is a 404 (and nothing is persisted)."""
+    dc = client.app.state.dc
+    dc.tmdb.enabled = True
+
+    async def fake_by_id(tmdb_id, media_type="movie"):
+        return None
+
+    monkeypatch.setattr(dc.tmdb, "by_id", fake_by_id)
+    r = client.post("/api/poster-override",
+                    json={"title": "Skyharbor", "type": "movie", "tmdb_id": 999999})
+    assert r.status_code == 404

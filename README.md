@@ -1,3 +1,7 @@
+> **📦 Archived — moved to [google-drive-suite](https://github.com/AdinathChaudhari/google-drive-suite).**
+> This project now lives in the `drivecast/` folder of that monorepo; the full
+> commit history is preserved here, read-only.
+
 # drivecast
 
 Stream video (and audio) straight from your Google **Shared Drives** — no
